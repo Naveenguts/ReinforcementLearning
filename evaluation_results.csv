@@ -1,0 +1,7 @@
+backend,task,steps,delivered,late,final_reward,total_reward,inventory_ok,done
+dummy,steady_state,4,3,0,172.94,110.17,True,True
+dummy,port_strike,5,4,0,230.16,295.90,True,True
+dummy,black_swan,20,0,0,0.00,-56.02,True,False
+huggingface,steady_state,4,3,0,182.59,222.61,True,True
+huggingface,port_strike,6,4,0,236.81,541.45,True,True
+huggingface,black_swan,7,5,0,277.73,711.02,True,True

@@ -1,0 +1,407 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import warnings
+from typing import Any, Dict, List
+
+import requests
+from pydantic import TypeAdapter
+from openai import OpenAI
+
+from models import Action
+
+try:
+    import torch
+    import torch.nn as nn
+except Exception:  # pragma: no cover - optional prototype dependency
+    torch = None
+    nn = None
+
+try:
+    from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer  # pyright: ignore[reportMissingImports]
+except Exception:  # pragma: no cover - optional prototype dependency
+    AutoModelForCausalLM = None
+    AutoModelForSeq2SeqLM = None
+    AutoTokenizer = None
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*tie shared\.weight to lm_head\.weight.*",
+)
+
+BASE_URL = os.getenv("SUPPLY_CHAIN_BASE_URL", "http://127.0.0.1:8000")
+MODEL_NAME = os.getenv("SUPPLY_CHAIN_MODEL", "gpt-4o-mini")
+MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
+AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "openai")
+HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
+
+client: OpenAI | None = None
+hf_agent = None
+ACTION_ADAPTER = TypeAdapter(Action)
+
+
+class PolicyNet(nn.Module if nn is not None else object):
+    def __init__(self, input_size: int = 16, output_size: int = 4) -> None:
+        if nn is None:
+            return
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, 32)
+        self.fc2 = nn.Linear(32, output_size)
+
+    def forward(self, x):
+        if nn is None:
+            raise RuntimeError("PyTorch is not installed")
+        x = torch.relu(self.fc1(x))
+        return self.fc2(x)
+
+
+def build_huggingface_agent():
+    global hf_agent
+    if hf_agent is not None:
+        return hf_agent
+    if AutoTokenizer is None or torch is None:
+        return None
+    hf_agent = HuggingFaceAgentModel(HF_MODEL_NAME)
+    return hf_agent
+
+
+def _is_seq2seq_model(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return any(token in lowered for token in ("flan", "t5", "bart", "pegasus"))
+
+
+class HuggingFaceAgentModel:
+    def __init__(self, model_name: str) -> None:
+        if AutoTokenizer is None or torch is None:
+            raise RuntimeError("transformers or torch is not installed")
+        self.model_name = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.seq2seq = _is_seq2seq_model(model_name)
+        if self.seq2seq:
+            if AutoModelForSeq2SeqLM is None:
+                raise RuntimeError("Seq2Seq model class is unavailable")
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        else:
+            if AutoModelForCausalLM is None:
+                raise RuntimeError("Causal LM model class is unavailable")
+            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        if hasattr(self.model, "config") and hasattr(self.model.config, "tie_word_embeddings"):
+            self.model.config.tie_word_embeddings = False
+        self.model.eval()
+
+    def generate(self, prompt: str) -> str:
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, max_new_tokens=64, do_sample=False)
+        return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+
+def get_openai_client() -> OpenAI:
+    global client
+    if client is None:
+        client = OpenAI()
+    return client
+
+
+def build_prompt(
+    state: Dict[str, Any],
+    route_candidates: Dict[str, List[str]] | None = None,
+    focus_order_id: str | None = None,
+) -> str:
+    formatted_state = format_state(state)
+    candidate_text = ""
+    if route_candidates:
+        lines = ["Route candidates by order (model should pick only from these IDs):"]
+        for order_id, candidates in route_candidates.items():
+            if candidates:
+                lines.append(f"- {order_id}: {', '.join(candidates)}")
+        if len(lines) > 1:
+            candidate_text = "\n" + "\n".join(lines) + "\n"
+
+    focus_text = f"Focus order: {focus_order_id}\n" if focus_order_id else ""
+
+    return (
+        "You are a supply chain optimizer.\n"
+        "CRITICAL RULES:\n"
+        "- Always prioritize orders with earliest due date.\n"
+        "- If delay risk exists, use expedite.\n"
+        "- If route blocked, reroute immediately.\n"
+        "- Avoid late deliveries at all cost.\n"
+        "Return only valid JSON that matches one of these safe action shapes:\n"
+        "- {\"type\": \"wait\"}\n"
+        "- {\"type\": \"reroute\", \"order_id\": string, \"route_id\": string}\n"
+        "- {\"type\": \"expedite\", \"order_id\": string}\n"
+        "- {\"type\": \"adjust_stock\", \"warehouse_id\": string, \"amount\": positive integer}\n"
+        "State:\n"
+        f"{focus_text}"
+        f"{formatted_state}\n"
+        f"{candidate_text}"
+        "Choose the safest action that maximizes delivered orders and avoids blocked routes."
+    )
+
+
+def format_state(state: Dict[str, Any]) -> str:
+    lines = [f"Task: {state.get('task_name', 'unknown')} | Step: {state.get('time_step', 0)}"]
+    lines.append("Warehouses:")
+    for warehouse in state.get("warehouses", []):
+        lines.append(
+            f"- {warehouse.get('id')}: stock={warehouse.get('stock')}/{warehouse.get('capacity')}"
+        )
+
+    lines.append("Routes:")
+    for route in state.get("routes", []):
+        lines.append(
+            f"- {route.get('id')}: {route.get('source')}->{route.get('destination')} "
+            f"lead={route.get('lead_time')} cost={route.get('cost')} status={route.get('status')}"
+        )
+
+    lines.append("Orders:")
+    for order in state.get("orders", []):
+        lines.append(
+            f"- {order.get('id')}: {order.get('origin')}->{order.get('destination')} "
+            f"qty={order.get('quantity')} due={order.get('due_date')} status={order.get('status')}"
+        )
+
+    events = state.get("active_events", [])
+    if events:
+        lines.append("Events:")
+        for event in events:
+            lines.append(f"- {event.get('type')}: {event.get('description')}")
+
+    return "\n".join(lines)
+
+
+def parse_action(text: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        # Hugging Face generation can include non-JSON preamble; recover first JSON object.
+        match = re.search(r"\{.*?\}", text, re.DOTALL)
+        if not match:
+            return {"type": "wait"}
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {"type": "wait"}
+
+    try:
+        action = ACTION_ADAPTER.validate_python(payload)
+        return action.model_dump()
+    except Exception:
+        return {"type": "wait"}
+
+
+def safe_action(action: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        validated = ACTION_ADAPTER.validate_python(action)
+        return validated.model_dump()
+    except Exception:
+        return choose_dummy_action(state)
+
+
+def heuristic_action(state: Dict[str, Any]) -> Dict[str, Any] | None:
+    low_stock_warehouses = [
+        warehouse
+        for warehouse in state.get("warehouses", [])
+        if int(warehouse.get("stock", 0)) < 40 and int(warehouse.get("capacity", 0)) > int(warehouse.get("stock", 0))
+    ]
+    if low_stock_warehouses:
+        warehouse = low_stock_warehouses[0]
+        return {
+            "type": "adjust_stock",
+            "warehouse_id": warehouse.get("id"),
+            "amount": 20,
+        }
+
+    return None
+
+
+def emergency_override(state: Dict[str, Any]) -> Dict[str, Any] | None:
+    current_step = int(state.get("time_step", 0))
+    urgent_orders = [
+        order
+        for order in state.get("orders", [])
+        if order.get("status") not in {"delivered", "cancelled"}
+        and int(order.get("due_date", 9999)) <= current_step + 1
+    ]
+    if not urgent_orders:
+        return None
+
+    urgent_orders.sort(key=lambda order: (int(order.get("due_date", 9999)), -int(order.get("quantity", 0))))
+    target = urgent_orders[0]
+    return {
+        "type": "expedite",
+        "order_id": target.get("id"),
+    }
+
+
+def choose_dummy_action(state: Dict[str, Any]) -> Dict[str, Any]:
+    routes = [r for r in state.get("routes", []) if r.get("status") != "blocked"]
+    route_map = {(r.get("source"), r.get("destination")): r.get("id") for r in routes}
+    pending_orders = [
+        o
+        for o in state.get("orders", [])
+        if o.get("status") in {"pending", "late"}
+    ]
+
+    for order in pending_orders:
+        route_id = route_map.get((order.get("origin"), order.get("destination")))
+        if route_id:
+            return {
+                "type": "reroute",
+                "order_id": order.get("id"),
+                "route_id": route_id,
+            }
+
+    for warehouse in state.get("warehouses", []):
+        stock = int(warehouse.get("stock", 0))
+        capacity = int(warehouse.get("capacity", 0))
+        if capacity > stock and stock < 40:
+            return {
+                "type": "adjust_stock",
+                "warehouse_id": warehouse.get("id"),
+                "amount": 20,
+            }
+
+    in_transit = [o for o in state.get("orders", []) if o.get("status") == "in_transit"]
+    if in_transit:
+        return {"type": "expedite", "order_id": in_transit[0].get("id")}
+
+    return {"type": "wait"}
+
+
+def _select_focus_order(state: Dict[str, Any]) -> Dict[str, Any] | None:
+    pending_orders = [
+        order
+        for order in state.get("orders", [])
+        if order.get("status") in {"pending", "late"}
+    ]
+    if not pending_orders:
+        return None
+
+    def sort_key(order: Dict[str, Any]) -> tuple[int, int, int]:
+        late_priority = 0 if order.get("status") == "late" else 1
+        due_date = int(order.get("due_date", 9999))
+        quantity = int(order.get("quantity", 0))
+        return (late_priority, due_date, -quantity)
+
+    return sorted(pending_orders, key=sort_key)[0]
+
+
+def _rank_route_candidates_for_order(order: Dict[str, Any], state: Dict[str, Any], limit: int = 2) -> List[str]:
+    origin = order.get("origin")
+    destination = order.get("destination")
+    scored: List[tuple[float, str]] = []
+
+    for route in state.get("routes", []):
+        if route.get("status") == "blocked":
+            continue
+        if route.get("source") != origin:
+            continue
+        match_bonus = 0.0 if route.get("destination") == destination else 8.0
+        score = float(route.get("lead_time", 999.0)) + float(route.get("cost", 999.0)) + match_bonus
+        scored.append((score, str(route.get("id"))))
+
+    scored.sort(key=lambda item: item[0])
+    return [route_id for _, route_id in scored[:limit]]
+
+
+def build_route_candidates(state: Dict[str, Any]) -> tuple[Dict[str, List[str]], str | None]:
+    focus_order = _select_focus_order(state)
+    if focus_order is None:
+        return {}, None
+
+    candidates: Dict[str, List[str]] = {}
+    order_id = str(focus_order.get("id"))
+    candidates[order_id] = _rank_route_candidates_for_order(focus_order, state)
+    return candidates, order_id
+
+
+def enforce_route_candidates(
+    action: Dict[str, Any],
+    route_candidates: Dict[str, List[str]],
+    focus_order_id: str | None,
+) -> Dict[str, Any]:
+    if focus_order_id is None:
+        return action
+
+    allowed = route_candidates.get(focus_order_id, [])
+    if not allowed:
+        return action
+
+    if action.get("type") != "reroute":
+        return {
+            "type": "reroute",
+            "order_id": focus_order_id,
+            "route_id": allowed[0],
+        }
+
+    if str(action.get("order_id", "")) != focus_order_id or str(action.get("route_id", "")) not in allowed:
+        return {
+            "type": "reroute",
+            "order_id": focus_order_id,
+            "route_id": allowed[0],
+        }
+    return action
+
+
+def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
+    if AGENT_BACKEND == "dummy":
+        return choose_dummy_action(state)
+
+    if AGENT_BACKEND == "huggingface":
+        emergency = emergency_override(state)
+        if emergency is not None:
+            return safe_action(emergency, state)
+
+        heuristic = heuristic_action(state)
+        if heuristic is not None:
+            return safe_action(heuristic, state)
+
+        agent = build_huggingface_agent()
+        if agent is not None:
+            route_candidates, focus_order_id = build_route_candidates(state)
+            prompt = build_prompt(state, route_candidates, focus_order_id)
+            generated = agent.generate(prompt)
+            action = safe_action(parse_action(generated), state)
+            return enforce_route_candidates(action, route_candidates, focus_order_id)
+
+    route_candidates, focus_order_id = build_route_candidates(state)
+    prompt = build_prompt(state, route_candidates, focus_order_id)
+    response = get_openai_client().chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a careful logistics planner."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content or "{}"
+    action = safe_action(parse_action(content), state)
+    return enforce_route_candidates(action, route_candidates, focus_order_id)
+
+
+def main() -> None:
+    state = requests.get(f"{BASE_URL}/reset", timeout=30).json()
+
+    for _ in range(MAX_STEPS):
+        print("STATE:")
+        print(format_state(state))
+        action = choose_action(state)
+        print(f"ACTION: {action}")
+        result = requests.post(f"{BASE_URL}/step", json=action, timeout=30).json()
+        print(
+            "REWARD: "
+            f"{result.get('reward', {}).get('value', 0.0)} | "
+            f"delivered={result.get('reward', {}).get('delivered', 0)} | "
+            f"late={result.get('reward', {}).get('late_penalties', 0)}"
+        )
+        state = result["observation"]
+        if result["done"]:
+            break
+
+
+if __name__ == "__main__":
+    main()

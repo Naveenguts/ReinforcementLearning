@@ -1,0 +1,5 @@
+name: supply-chain-chaos
+display_name: Supply Chain Chaos
+version: 0.1.0
+description: Graph-based stochastic supply chain environment with disruptive events, routing actions, and reward shaping.
+entrypoint: server:app
