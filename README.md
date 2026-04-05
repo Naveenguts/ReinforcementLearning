@@ -68,14 +68,16 @@ Baseline run snapshot:
 
 These values show clear task difficulty progression.
 
-## Evaluation Protocol
+## Evaluation Protocol Against Realistic Baseline
 
-Use a reproducible evaluation sequence:
+Compare your RL agent against the deterministic heuristic baseline:
 
 1. `GET /reset?task=<task_name>`
-2. Run `inference.py` with fixed backend/config
-3. `GET /grade?task=<task_name>`
-4. Repeat across all tasks with same seed/config
+2. Run `inference.py` with `SUPPLY_CHAIN_AGENT_BACKEND=dummy` for baseline
+3. Run your agent and record score
+4. `GET /grade?task=<task_name>` for both
+5. Compare scores: **Your agent should beat the heuristic to demonstrate value**
+6. Repeat across all tasks with same seed/config
 
 Recommended comparison metrics:
 
@@ -85,16 +87,28 @@ Recommended comparison metrics:
 - Normalized cumulative reward
 - Failure rate (invalid/no-progress episodes)
 
-## Strong Baseline Policy
+## Baseline Approach: Production-Grade Heuristic
 
-The deterministic baseline is stronger than a naive rule set:
+**The reference solution uses a deterministic logistics heuristic, not an AI model.** This is what real supply chain companies deploy:
 
-- Prioritizes urgent/late orders by due date and quantity.
-- Uses proactive expedite for near-deadline in-transit orders.
-- Applies stock replenishment from projected near-term demand.
-- Falls back safely when model calls fail.
+**Why heuristics, not LLMs?**
+- Supply chain software (SAP, Oracle, Flexport, JDA) uses rule-based engines, not black-box LLMs
+- Deterministic execution is required for audit trails and explainability
+- General-purpose LLMs lack domain training and cannot optimize supply chain tradeoffs reliably
+- Heuristics are fast, reproducible, and trustworthy for operational use
 
-This provides a credible baseline for Phase 2 comparisons.
+**The dummy backend strategy:**
+- Prioritizes urgent/late orders by due date and quantity
+- Uses proactive expedite for near-deadline in-transit orders
+- Applies stock replenishment from projected near-term demand
+- Falls back gracefully if misconfigured
+
+**Baseline performance on deterministic graders:**
+- `steady_state`: score `0.7338` (easy: all 3 orders delivered)
+- `port_strike`: score `1.0000` (medium: resilience under blocked route)
+- `black_swan`: score `0.1279` (hard: graceful degradation under cascades)
+
+This approach provides a **credible, realistic baseline** for Phase 2 agent comparisons.
 
 ## Expected Failure Modes and Anti-Hack Protections
 
@@ -118,20 +132,31 @@ How grading avoids trivial hacks:
 - `openenv.yaml` includes metadata, tasks, spaces, and validation details.
 - Dockerized for Hugging Face Spaces.
 
+## Agent Backends
+
+**Primary (Realistic):**
+- `SUPPLY_CHAIN_AGENT_BACKEND=dummy`: Deterministic heuristic (recommended for baseline and comparison)
+
+**Optional (Research-Only):**
+- `SUPPLY_CHAIN_AGENT_BACKEND=openai`: General-purpose LLM fallback (requires API key)
+- `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`: Local LLM proof-of-concept (not domain-tuned)
+
+Note: Optional backends fall back to `dummy` if misconfigured or unavailable, ensuring reproducibility.
+
 ## Environment Variables
 
 Required:
 
 - `API_BASE_URL`
-- `MODEL_NAME`
-- `HF_TOKEN`
+- `MODEL_NAME` (used only if `SUPPLY_CHAIN_AGENT_BACKEND=openai`)
+- `HF_TOKEN` (used only if `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`)
 
 Optional:
 
-- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy`, `openai`, `huggingface`)
-- `SUPPLY_CHAIN_TASK`
-- `SUPPLY_CHAIN_HF_MODEL`
-- `SUPPLY_CHAIN_MAX_STEPS`
+- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy` ← default, `openai`, `huggingface`)
+- `SUPPLY_CHAIN_TASK` (default: `steady_state`)
+- `SUPPLY_CHAIN_HF_MODEL` (default: `google/flan-t5-small`, research-only)
+- `SUPPLY_CHAIN_MAX_STEPS` (default: `20`)
 
 ## Run Locally
 
