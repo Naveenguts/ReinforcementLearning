@@ -475,7 +475,7 @@ def main() -> None:
     """Main entry point following Meta's [START] [STEP] [END] format."""
     task_name = os.getenv("SUPPLY_CHAIN_TASK", "steady_state")
     benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
-    model_label = HF_MODEL_NAME if AGENT_BACKEND == "huggingface" else MODEL_NAME
+    model_label = HF_MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
     
     log_start(task=task_name, env=benchmark_name, model=model_label)
     
