@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from copy import deepcopy
 from typing import Dict, List, Optional
@@ -29,7 +30,11 @@ ACTION_ADAPTER = TypeAdapter(Action)
 
 class SupplyChainEnv:
     def __init__(self, seed: Optional[int] = None) -> None:
+        # Deterministic seeding for reproducibility
+        if seed is None:
+            seed = 42  # Default seed for consistency
         self.random = random.Random(seed)
+        self.seed = seed
         self.max_steps = 20
         self.state: Optional[Observation] = None
         self.task_name: TaskName = TaskName.steady_state
@@ -37,12 +42,18 @@ class SupplyChainEnv:
         self.base_demand = 1.0
         self.fuel_multiplier = 1.0
         self.last_info: Dict[str, object] = {}
+        self.episode_reward = 0.0  # Track cumulative reward for scoring
+        self.reward_min = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
+        self.reward_max = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
+        self.episode_reward_normalized = 0.0
 
     def reset(self, task: TaskName | str = TaskName.steady_state) -> Observation:
         preset = self._get_task_preset(task)
         self.task_name = preset.name
         self.task_preset = preset
         self.max_steps = preset.max_steps
+        self.episode_reward = 0.0  # Reset cumulative reward
+        self.episode_reward_normalized = 0.0
 
         warehouses = deepcopy(preset.initial_warehouses)
         routes = deepcopy(preset.initial_routes)
@@ -149,6 +160,9 @@ class SupplyChainEnv:
 
         self.state.time_step += 1
         reward = self._calculate_reward()
+        self.episode_reward += reward.value  # Track cumulative reward
+        # Keep cumulative normalized reward aligned with logged 2-decimal step rewards.
+        self.episode_reward_normalized += round(self._normalize_reward(reward.value), 2)
         done = self._is_done()
         if not done and self.state.time_step >= self.max_steps:
             done = True
@@ -161,6 +175,13 @@ class SupplyChainEnv:
             info=deepcopy(self.last_info),
         )
         return result
+
+    def _normalize_reward(self, raw_reward: float) -> float:
+        """Normalize a raw step reward into [0.0, 1.0]."""
+        if self.reward_max <= self.reward_min:
+            return 0.0
+        normalized = (raw_reward - self.reward_min) / (self.reward_max - self.reward_min)
+        return max(0.0, min(1.0, normalized))
 
     def _apply_action(self, action: Action) -> None:
         if action.type == ActionType.wait:

@@ -3,3 +3,166 @@ display_name: Supply Chain Chaos
 version: 0.1.0
 description: Graph-based stochastic supply chain environment with disruptive events, routing actions, and reward shaping.
 entrypoint: server:app
+
+# Task definitions (Meta requirement: 3+ tasks with graders)
+tasks:
+  - name: steady_state
+    description: Baseline demand with no forced disruptions. Deliver 3 orders on time.
+    difficulty: easy
+    max_steps: 20
+    expected_reward_range: [0.0, 300.0]
+    grader: graders.SteadyStateGrader
+    
+  - name: port_strike
+    description: Primary route blocked at step 5. 4 orders must be rerouted under disruption.
+    difficulty: medium
+    max_steps: 20
+    expected_reward_range: [0.0, 400.0]
+    grader: graders.PortStrikeGrader
+    
+  - name: black_swan
+    description: Cascading disruptions (route closure, demand spike, fuel surge). 5 orders test agent resilience.
+    difficulty: hard
+    max_steps: 20
+    expected_reward_range: [0.0, 500.0]
+    grader: graders.BlackSwanGrader
+
+# Observation space (what agent sees each step)
+observation:
+  type: object
+  properties:
+    task_name: 
+      type: string
+      enum: [steady_state, port_strike, black_swan]
+    task_description: 
+      type: string
+    warehouses:
+      type: array
+      items:
+        type: object
+        properties:
+          id: {type: string}
+          stock: {type: integer, minimum: 0}
+          capacity: {type: integer, minimum: 1}
+    routes:
+      type: array
+      items:
+        type: object
+        properties:
+          id: {type: string}
+          source: {type: string}
+          destination: {type: string}
+          lead_time: {type: number, minimum: 0.0}
+          cost: {type: number, minimum: 0.0}
+          status: {type: string, enum: [active, blocked, congested]}
+    orders:
+      type: array
+      items:
+        type: object
+        properties:
+          id: {type: string}
+          origin: {type: string}
+          destination: {type: string}
+          quantity: {type: integer, minimum: 1}
+          due_date: {type: integer, minimum: 0}
+          route_id: {type: string, nullable: true}
+          status: {type: string, enum: [pending, in_transit, delivered, late, cancelled]}
+          progress: {type: number, minimum: 0.0, maximum: 1.0}
+    time_step: {type: integer, minimum: 0}
+    active_events: 
+      type: array
+      items:
+        type: object
+        properties:
+          type: {type: string, enum: [route_block, demand_spike, fuel_surge]}
+          target_id: {type: string, nullable: true}
+          magnitude: {type: number}
+          description: {type: string}
+    carbon_footprint: {type: number, minimum: 0.0}
+
+# Action space (what agent can do each step)
+action:
+  type: object
+  oneOf:
+    - type: object
+      properties:
+        type: {const: "wait"}
+      required: [type]
+      
+    - type: object
+      properties:
+        type: {const: "reroute"}
+        order_id: {type: string}
+        route_id: {type: string}
+      required: [type, order_id, route_id]
+      
+    - type: object
+      properties:
+        type: {const: "expedite"}
+        order_id: {type: string}
+      required: [type, order_id]
+      
+    - type: object
+      properties:
+        type: {const: "adjust_stock"}
+        warehouse_id: {type: string}
+        amount: {type: integer, minimum: 1}
+      required: [type, warehouse_id, amount]
+
+# Reward structure
+reward:
+  type: object
+  properties:
+    value:
+      type: number
+      description: Raw episode reward (not normalized)
+    delivered:
+      type: integer
+      minimum: 0
+      description: Count of delivered orders
+    operating_cost: {type: number}
+    late_penalties: {type: number}
+    storage_fees: {type: number}
+    carbon_penalty: {type: number}
+    
+# Endpoints required by Meta
+endpoints:
+  - path: /reset
+    method: GET
+    params:
+      task: {type: string, enum: [steady_state, port_strike, black_swan], default: steady_state}
+    returns: Observation
+    
+  - path: /step
+    method: POST
+    body: Action
+    returns: StepResult (observation, reward, done, info)
+    
+  - path: /state
+    method: GET
+    returns: Current Observation
+    
+  - path: /grade
+    method: GET
+    params:
+      task: {type: string, enum: [steady_state, port_strike, black_swan], default: steady_state}
+    returns:
+      score: {type: number, minimum: 0.0, maximum: 1.0}
+      delivered: {type: integer}
+      late: {type: integer}
+      total_orders: {type: integer}
+      steps_taken: {type: integer}
+
+# Validation requirements
+validation:
+  required_environment_variables:
+    - API_BASE_URL
+    - MODEL_NAME
+    - HF_TOKEN
+  required_logging_format: "[START] [STEP] [END]"
+  max_episode_length: 20
+  target_infrastructure:
+    cpu: 2
+    memory_gb: 8
+    timeout_seconds: 1200  # 20 minutes max
+

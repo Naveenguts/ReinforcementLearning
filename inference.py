@@ -4,7 +4,7 @@ import json
 import os
 import re
 import warnings
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import TypeAdapter
@@ -31,11 +31,14 @@ warnings.filterwarnings(
     message=r".*tie shared\.weight to lm_head\.weight.*",
 )
 
-BASE_URL = os.getenv("SUPPLY_CHAIN_BASE_URL", "http://127.0.0.1:8000")
-MODEL_NAME = os.getenv("SUPPLY_CHAIN_MODEL", "gpt-4o-mini")
+BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
 AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "openai")
 HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
+REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
+REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
 
 client: OpenAI | None = None
 hf_agent = None
@@ -383,24 +386,135 @@ def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
     return enforce_route_candidates(action, route_candidates, focus_order_id)
 
 
-def main() -> None:
-    state = requests.get(f"{BASE_URL}/reset", timeout=30).json()
+def log_start(task: str, env: str, model: str) -> None:
+    """Emit [START] line per Meta spec."""
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-    for _ in range(MAX_STEPS):
-        print("STATE:")
-        print(format_state(state))
-        action = choose_action(state)
-        print(f"ACTION: {action}")
-        result = requests.post(f"{BASE_URL}/step", json=action, timeout=30).json()
-        print(
-            "REWARD: "
-            f"{result.get('reward', {}).get('value', 0.0)} | "
-            f"delivered={result.get('reward', {}).get('delivered', 0)} | "
-            f"late={result.get('reward', {}).get('late_penalties', 0)}"
-        )
-        state = result["observation"]
-        if result["done"]:
-            break
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    """Emit [STEP] line per Meta spec."""
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+    """Emit [END] line per Meta spec."""
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+
+
+def action_to_string(action: Dict[str, Any]) -> str:
+    """Convert action dict to a string representation for logging."""
+    action_type = action.get("type", "unknown")
+    if action_type == "wait":
+        return "wait()"
+    elif action_type == "reroute":
+        order_id = action.get("order_id", "?")
+        route_id = action.get("route_id", "?")
+        return f"reroute('{order_id}','{route_id}')"
+    elif action_type == "expedite":
+        order_id = action.get("order_id", "?")
+        return f"expedite('{order_id}')"
+    elif action_type == "adjust_stock":
+        warehouse_id = action.get("warehouse_id", "?")
+        amount = action.get("amount", "?")
+        return f"adjust_stock('{warehouse_id}',{amount})"
+    else:
+        return f"action({action})"
+
+
+def normalize_reward(raw_reward: float) -> float:
+    """Normalize raw reward into [0.0, 1.0] for logging compliance."""
+    if REWARD_MAX <= REWARD_MIN:
+        return 0.0
+    normalized = (raw_reward - REWARD_MIN) / (REWARD_MAX - REWARD_MIN)
+    return max(0.0, min(1.0, normalized))
+
+
+def is_success_state(state: Dict[str, Any]) -> bool:
+    """Episode is successful when all orders are delivered and none are late."""
+    orders = state.get("orders", [])
+    if not orders:
+        return False
+    delivered = sum(1 for order in orders if order.get("status") == "delivered")
+    late = sum(1 for order in orders if order.get("status") == "late")
+    return delivered == len(orders) and late == 0
+
+
+def main() -> None:
+    """Main entry point following Meta's [START] [STEP] [END] format."""
+    task_name = os.getenv("SUPPLY_CHAIN_TASK", "steady_state")
+    benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
+    
+    log_start(task=task_name, env=benchmark_name, model=MODEL_NAME)
+    
+    rewards: List[float] = []
+    steps_taken = 0
+    success = False
+    last_error: Optional[str] = None
+    
+    try:
+        # Reset and get initial state
+        reset_response = requests.get(f"{BASE_URL}/reset?task={task_name}", timeout=30)
+        reset_response.raise_for_status()
+        state = reset_response.json()
+        
+        # Main loop
+        for step in range(1, MAX_STEPS + 1):
+            try:
+                # Choose action
+                action = choose_action(state)
+                action_str = action_to_string(action)
+                
+                # Step environment
+                step_response = requests.post(f"{BASE_URL}/step", json=action, timeout=30)
+                step_response.raise_for_status()
+                result = step_response.json()
+                
+                # Extract and normalize reward for Meta-compliant logging.
+                raw_reward = float(result.get("reward", {}).get("value", 0.0))
+                reward_value = normalize_reward(raw_reward)
+                done = result.get("done", False)
+                error = None
+                
+                rewards.append(reward_value)
+                steps_taken = step
+                
+                # Log step
+                log_step(step=step, action=action_str, reward=reward_value, done=done, error=error)
+                
+                # Update state
+                state = result.get("observation", state)
+                
+                # Check if episode is done
+                if done:
+                    break
+                    
+            except Exception as step_error:
+                last_error = str(step_error)
+                log_step(
+                    step=step,
+                    action="error",
+                    reward=0.0,
+                    done=True,
+                    error=last_error
+                )
+                break
+        
+        # Determine success from final delivery outcomes.
+        success = is_success_state(state)
+        
+    except Exception as exc:
+        last_error = str(exc)
+        success = False
+    
+    finally:
+        # Always emit [END]
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
 
 if __name__ == "__main__":
