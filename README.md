@@ -134,28 +134,28 @@ How grading avoids trivial hacks:
 
 ## Agent Backends
 
+**Hackathon Constraint: Only dummy or huggingface backends are allowed.**
+
 **Primary (Realistic):**
 - `SUPPLY_CHAIN_AGENT_BACKEND=dummy`: Deterministic heuristic (recommended for baseline and comparison)
 
 **Optional (Research-Only):**
-- `SUPPLY_CHAIN_AGENT_BACKEND=openai`: General-purpose LLM fallback (requires API key)
 - `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`: Local LLM proof-of-concept (not domain-tuned)
 
-Note: Optional backends fall back to `dummy` if misconfigured or unavailable, ensuring reproducibility.
+Note: If HuggingFace model fails to load, automatically falls back to `dummy` to ensure reproducibility.
 
 ## Environment Variables
 
 Required:
 
 - `API_BASE_URL`
-- `MODEL_NAME` (used only if `SUPPLY_CHAIN_AGENT_BACKEND=openai`)
-- `HF_TOKEN` (used only if `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`)
+- `HF_TOKEN` (only if using `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`)
 
 Optional:
 
-- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy` ← default, `openai`, `huggingface`)
+- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy` ← default, `huggingface`)
 - `SUPPLY_CHAIN_TASK` (default: `steady_state`)
-- `SUPPLY_CHAIN_HF_MODEL` (default: `google/flan-t5-small`, research-only)
+- `SUPPLY_CHAIN_HF_MODEL` (default: `google/flan-t5-small`, HuggingFace only)
 - `SUPPLY_CHAIN_MAX_STEPS` (default: `20`)
 
 ## Run Locally

@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import TypeAdapter
-from openai import OpenAI
 
 from models import Action
 
@@ -32,15 +31,13 @@ warnings.filterwarnings(
 )
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
-AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "openai")
+AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "dummy")  # Hackathon: only dummy or huggingface allowed
 HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
 REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
 REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
 
-client: OpenAI | None = None
 hf_agent = None
 ACTION_ADAPTER = TypeAdapter(Action)
 
@@ -101,11 +98,7 @@ class HuggingFaceAgentModel:
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
 
-def get_openai_client() -> OpenAI:
-    global client
-    if client is None:
-        client = OpenAI()
-    return client
+# OpenAI backend removed: hackathon constraint allows only dummy or huggingface
 
 
 def build_prompt(
@@ -392,6 +385,7 @@ def enforce_route_candidates(
 
 
 def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Choose action using allowed backends: dummy or huggingface (per hackathon constraint)."""
     if AGENT_BACKEND == "dummy":
         return choose_dummy_action(state)
 
@@ -411,32 +405,11 @@ def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
             generated = agent.generate(prompt)
             action = safe_action(parse_action(generated), state)
             return enforce_route_candidates(action, route_candidates, focus_order_id)
-
-    emergency = emergency_override(state)
-    if emergency is not None:
-        return safe_action(emergency, state)
-
-    heuristic = heuristic_action(state)
-    if heuristic is not None:
-        return safe_action(heuristic, state)
-
-    route_candidates, focus_order_id = build_route_candidates(state)
-    prompt = build_prompt(state, route_candidates, focus_order_id)
-    try:
-        response = get_openai_client().chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "You are a careful logistics planner."},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or "{}"
-        action = safe_action(parse_action(content), state)
-        return enforce_route_candidates(action, route_candidates, focus_order_id)
-    except Exception:
-        # Strong deterministic fallback keeps baseline reproducible even without API access.
+        # HuggingFace model failed to load; fall back to dummy
         return choose_dummy_action(state)
+
+    # Unknown backend or none set; fall back to dummy (safe default)
+    return choose_dummy_action(state)
 
 
 def log_start(task: str, env: str, model: str) -> None:
