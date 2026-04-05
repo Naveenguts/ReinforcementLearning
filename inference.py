@@ -241,35 +241,76 @@ def emergency_override(state: Dict[str, Any]) -> Dict[str, Any] | None:
 
 
 def choose_dummy_action(state: Dict[str, Any]) -> Dict[str, Any]:
-    routes = [r for r in state.get("routes", []) if r.get("status") != "blocked"]
-    route_map = {(r.get("source"), r.get("destination")): r.get("id") for r in routes}
-    pending_orders = [
-        o
-        for o in state.get("orders", [])
-        if o.get("status") in {"pending", "late"}
-    ]
+    current_step = int(state.get("time_step", 0))
+    routes = [route for route in state.get("routes", []) if route.get("status") != "blocked"]
 
+    def route_key(route: Dict[str, Any]) -> tuple[float, float]:
+        return (float(route.get("lead_time", 999.0)), float(route.get("cost", 999.0)))
+
+    pending_orders = [
+        order
+        for order in state.get("orders", [])
+        if order.get("status") in {"pending", "late"}
+    ]
+    pending_orders.sort(
+        key=lambda order: (
+            0 if order.get("status") == "late" else 1,
+            int(order.get("due_date", 9999)),
+            -int(order.get("quantity", 0)),
+        )
+    )
+
+    # Proactive expedite for in-transit orders close to due date.
+    urgent_in_transit = [
+        order
+        for order in state.get("orders", [])
+        if order.get("status") == "in_transit"
+        and int(order.get("due_date", 9999)) <= current_step + 1
+    ]
+    if urgent_in_transit:
+        urgent_in_transit.sort(key=lambda order: int(order.get("due_date", 9999)))
+        return {"type": "expedite", "order_id": urgent_in_transit[0].get("id")}
+
+    # Route highest-priority pending order through the best available candidate.
     for order in pending_orders:
-        route_id = route_map.get((order.get("origin"), order.get("destination")))
-        if route_id:
-            return {
-                "type": "reroute",
-                "order_id": order.get("id"),
-                "route_id": route_id,
-            }
+        candidates = [
+            route
+            for route in routes
+            if route.get("source") == order.get("origin")
+        ]
+        if not candidates:
+            continue
+        candidates.sort(key=route_key)
+        best_route = candidates[0]
+        return {
+            "type": "reroute",
+            "order_id": order.get("id"),
+            "route_id": best_route.get("id"),
+        }
+
+    # Restock warehouses feeding near-due orders.
+    needed_by_origin: Dict[str, int] = {}
+    for order in pending_orders:
+        if int(order.get("due_date", 9999)) <= current_step + 2:
+            origin = str(order.get("origin"))
+            needed_by_origin[origin] = needed_by_origin.get(origin, 0) + int(order.get("quantity", 0))
 
     for warehouse in state.get("warehouses", []):
+        warehouse_id = str(warehouse.get("id"))
         stock = int(warehouse.get("stock", 0))
         capacity = int(warehouse.get("capacity", 0))
-        if capacity > stock and stock < 40:
+        projected_need = needed_by_origin.get(warehouse_id, 0)
+        if capacity > stock and (stock < 40 or stock < projected_need):
+            amount = max(10, min(capacity - stock, projected_need - stock if projected_need > stock else 20))
             return {
                 "type": "adjust_stock",
-                "warehouse_id": warehouse.get("id"),
-                "amount": 20,
+                "warehouse_id": warehouse_id,
+                "amount": amount,
             }
 
-    in_transit = [o for o in state.get("orders", []) if o.get("status") == "in_transit"]
+    in_transit = [order for order in state.get("orders", []) if order.get("status") == "in_transit"]
     if in_transit:
+        in_transit.sort(key=lambda order: int(order.get("due_date", 9999)))
         return {"type": "expedite", "order_id": in_transit[0].get("id")}
 
     return {"type": "wait"}
@@ -371,19 +412,31 @@ def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
             action = safe_action(parse_action(generated), state)
             return enforce_route_candidates(action, route_candidates, focus_order_id)
 
+    emergency = emergency_override(state)
+    if emergency is not None:
+        return safe_action(emergency, state)
+
+    heuristic = heuristic_action(state)
+    if heuristic is not None:
+        return safe_action(heuristic, state)
+
     route_candidates, focus_order_id = build_route_candidates(state)
     prompt = build_prompt(state, route_candidates, focus_order_id)
-    response = get_openai_client().chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "You are a careful logistics planner."},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-    )
-    content = response.choices[0].message.content or "{}"
-    action = safe_action(parse_action(content), state)
-    return enforce_route_candidates(action, route_candidates, focus_order_id)
+    try:
+        response = get_openai_client().chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "You are a careful logistics planner."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content or "{}"
+        action = safe_action(parse_action(content), state)
+        return enforce_route_candidates(action, route_candidates, focus_order_id)
+    except Exception:
+        # Strong deterministic fallback keeps baseline reproducible even without API access.
+        return choose_dummy_action(state)
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -449,8 +502,9 @@ def main() -> None:
     """Main entry point following Meta's [START] [STEP] [END] format."""
     task_name = os.getenv("SUPPLY_CHAIN_TASK", "steady_state")
     benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
+    model_label = HF_MODEL_NAME if AGENT_BACKEND == "huggingface" else MODEL_NAME
     
-    log_start(task=task_name, env=benchmark_name, model=MODEL_NAME)
+    log_start(task=task_name, env=benchmark_name, model=model_label)
     
     rewards: List[float] = []
     steps_taken = 0

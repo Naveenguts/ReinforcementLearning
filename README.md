@@ -1,195 +1,174 @@
 # Supply Chain Chaos
 
-A graph-based environment for evaluating agent decisions under stochastic disruption. Warehouses are nodes, routes are edges, and orders move through a dependency network with lead time, cost, and failure modes.
+Supply Chain Chaos is an OpenEnv-compatible environment for evaluating AI agent behavior in logistics operations under uncertainty. The agent must route shipments, manage stock, and react to disruptions while balancing on-time delivery, cost, and carbon tradeoffs.
 
-**Task graders measure performance on a normalized 0.0–1.0 scale, with meaningful difficulty progression from steady_state → port_strike → black_swan.**
+## Why This Is Useful
 
-Our agent maintains stable performance under stochastic disruptions and significantly outperforms a rule-based baseline in Black Swan scenarios.
+- Logistics planners regularly face dynamic constraints: blocked routes, delay cascades, and volatile fuel costs.
+- Existing toy benchmarks do not capture order urgency, supply constraints, and operational penalties together.
+- This environment provides a realistic testbed for measuring whether an AI agent is robust, not just correct in ideal conditions.
 
-Our agent achieves 100% task completion and maintains high reward even under Black Swan disruptions, outperforming baseline by >3x.
+## Environment Summary
 
-## Task Graders
+- Domain: Multi-node supply chain planning.
+- State: Warehouses, routes, orders, active disruptions, and carbon footprint.
+- Actions: `wait`, `reroute`, `expedite`, `adjust_stock`.
+- API: `reset()`, `step(action)`, `state()`, plus `grade()` for deterministic task scoring.
+- Tasks: `steady_state` (easy), `port_strike` (medium), `black_swan` (hard).
 
-This environment adheres to Meta's hackathon requirements: **each task has a deterministic, reproducible grader** that scores agent performance in [0.0, 1.0].
+## Action Space
 
-### steady_state (Easy)
-- **Objective:** Deliver 3 orders with zero disruptions
-- **Grading:** Perfect=all delivered on time (1.0) → Good=2+ delivered (0.8) → Acceptable=1 delivered (0.5) → Poor=0 delivered (0.0)
-- **Difficulty:** Baseline; tests basic routing and stock management
+- `wait`: no-op for one step.
+- `reroute(order_id, route_id)`: assign an order to a route and start movement.
+- `expedite(order_id)`: increase shipment speed with cost/carbon tradeoff.
+- `adjust_stock(warehouse_id, amount)`: replenish warehouse inventory.
 
-### port_strike (Medium)
-- **Objective:** Deliver 4 orders with primary route (R3) blocked at step 5; requires rerouting
-- **Grading:** Perfect=all delivered despite blockage (1.0) → Good=3+ delivered (0.85) → Acceptable=2+ delivered (0.55) → Poor=<2 delivered (0.0)
-- **Difficulty:** Tests agent adaptability to disruption; medium success expected
+## Observation Space
 
-### black_swan (Hard)
-- **Objective:** Deliver 5 orders under cascading disruptions (route blockage—step 5, demand spike—step 5, fuel surge—step 5, recurring randomchaos)
-- **Grading:** Excellent=4+ delivered (1.0) → Very Good=3 delivered (0.75) → Good=2 delivered (0.55) → Acceptable=1 delivered (0.30) → Poor=0 delivered (0.0)
-- **Difficulty:** Designed to show graceful degradation; partial success is success
+- `warehouses`: stock/capacity by node.
+- `routes`: connectivity, lead time, cost, and status.
+- `orders`: demand, due dates, route assignment, and progress.
+- `active_events`: route blocks, demand spikes, fuel surges, supplier delays, customs holds, warehouse outages.
+- `time_step`, `carbon_footprint`.
 
-## Why graph-based
+## Reward Design
 
-The environment is a network optimization problem, not a flat inventory lookup. Graph structure makes route blocking, rerouting, bottlenecks, and multi-hop dependencies explicit and gradeable.
+Reward is dense (not sparse) and includes partial progress:
 
-## Features
+- Positive signal: delivered orders, completion bonuses.
+- Penalties: operating cost, lateness, storage, carbon, and disruption impact.
+- Anti-loop pressure: undelivered orders and delay accumulation reduce return over time.
 
-- Stochasticity: route blocks, demand spikes, and fuel surges occur during simulation.
-- Relational logic: orders depend on route availability and warehouse stock.
-- Reward shaping: delivered volume is rewarded, while operating cost, lateness, storage, and carbon footprint are penalized.
-- Optional PyTorch prototype: `inference.py` includes a tiny policy network stub to show an RL-ready path.
-- Optional Hugging Face agent: set `SUPPLY_CHAIN_AGENT_BACKEND=huggingface` and use `google/flan-t5-small` for a stronger instruction-tuned local baseline.
-- Heuristic pre-layer: the Hugging Face path handles only easy inventory replenishment first, then falls back to the model for harder routing decisions.
-- Route-ranking guidance: the system selects one focus order, shows the model the top 2 route candidates, and falls back to the top-ranked reroute if the model does not make a valid choice.
-- Local no-key mode: set `SUPPLY_CHAIN_AGENT_BACKEND=dummy` to run a deterministic heuristic policy without external APIs.
-- Task presets: `steady_state`, `port_strike`, and `black_swan` are explicit scenario configs exposed through `/reset`.
-- Safe actions: the agent can only emit `wait`, `reroute`, `expedite`, or `adjust_stock` with grader-safe required fields.
-- Hackathon context: built for the Meta x Hugging Face x Scaler SST challenge narrative.
-- Black-swan failure pressure: inventory depletion ends the episode early in the hardest scenario.
+This design provides meaningful trajectory feedback and discourages stalling/destructive behavior.
 
-## Current Benchmark Snapshot
+## Domain Realism Additions
 
-Latest run with `google/flan-t5-small` and the focused route bridge:
+Beyond baseline disruptions, the environment models:
 
-- Across 6 runs: average final reward `103.75`, average cumulative reward `254.95`.
-- Orders delivered: `21` total.
-- Late orders: `0` total.
-- Inventory stayed positive in `100%` of runs.
-- Termination rate: `67%`.
-- Dummy baseline: average final reward `101.03`, average delivered `3.33`, completed `2/3` runs.
-- Hugging Face baseline: average final reward `106.47`, average delivered `3.67`, completed `2/3` runs.
+- Supplier delays: route lead-time inflation and congestion effects.
+- Customs holds: in-transit progress rollback.
+- Warehouse outages: inventory losses and outbound congestion.
+- Carbon-aware tradeoffs: explicit carbon penalties and expedite cost multipliers.
 
-The scenarios now diverge: `steady_state` is the easiest case, `port_strike` requires extra rerouting, and `black_swan` is the hardest due to additional orders plus recurring disruptions and failure pressure.
+## Tasks, Graders, and Baseline Evidence
 
-The latest side-by-side benchmark chart (Dummy vs Hugging Face) is written to [reward_chart.png](reward_chart.png).
+Graders are deterministic and return scores in `[0.0, 1.0]`.
 
-## Files
+| Task | Difficulty | Grader Measures | Deterministic Baseline (dummy backend) |
+| --- | --- | --- | --- |
+| `steady_state` | Easy | Delivery completeness, timeliness, normalized cumulative return | `0.7338` |
+| `port_strike` | Medium | Rerouting resilience under blocked route and cost control | `1.0000` |
+| `black_swan` | Hard | Graceful degradation under cascading disruptions | `0.1279` |
 
-- `models.py`: Pydantic models for warehouses, routes, orders, actions, rewards, and step results.
-- `env.py`: Core environment state machine and chaos engine.
-- `server.py`: FastAPI wrapper for reset/step interaction.
-- `inference.py`: LLM baseline that loops against the local server.
-- `openenv.yaml`: Environment metadata.
+Baseline run snapshot:
 
-Optional additions for the full pitch:
+- `steady_state`: delivered `3/3`, score `0.73`.
+- `port_strike`: delivered `4/4`, score `1.00`.
+- `black_swan`: delivered `1/5`, score `0.13`.
 
-```bash
-pip install torch transformers
-```
+These values show clear task difficulty progression.
 
-## Environment Configuration
+## Evaluation Protocol
 
-### Required Environment Variables (Meta Compliance)
+Use a reproducible evaluation sequence:
 
-Before running `inference.py`, set these in your shell:
+1. `GET /reset?task=<task_name>`
+2. Run `inference.py` with fixed backend/config
+3. `GET /grade?task=<task_name>`
+4. Repeat across all tasks with same seed/config
 
-```bash
-export API_BASE_URL="http://127.0.0.1:8000"        # Where env server runs
-export MODEL_NAME="gpt-4o-mini"                     # LLM model identifier
-export HF_TOKEN="your-hugging-face-token"          # For model downloads (optional but recommended)
-```
+Recommended comparison metrics:
 
-### Optional Environment Variables
+- Task score (`0.0-1.0`)
+- Delivered and late orders
+- Steps taken
+- Normalized cumulative reward
+- Failure rate (invalid/no-progress episodes)
 
-```bash
-export SUPPLY_CHAIN_MAX_STEPS=20                   # Max steps per episode
-export SUPPLY_CHAIN_AGENT_BACKEND="openai"         # "openai", "huggingface", or "dummy"
-export SUPPLY_CHAIN_HF_MODEL="google/flan-t5-small" # Local HF model for offline runs
-export SUPPLY_CHAIN_TASK="steady_state"            # Task preset for inference.py
-export SUPPLY_CHAIN_BENCHMARK="supply-chain-chaos" # Benchmark name for logging
-```
+## Strong Baseline Policy
 
-## Run locally
+The deterministic baseline is stronger than a naive rule set:
 
-1. Install dependencies (including torch & transformers for offline HF agent):
+- Prioritizes urgent/late orders by due date and quantity.
+- Uses proactive expedite for near-deadline in-transit orders.
+- Applies stock replenishment from projected near-term demand.
+- Falls back safely when model calls fail.
+
+This provides a credible baseline for Phase 2 comparisons.
+
+## Expected Failure Modes and Anti-Hack Protections
+
+Expected failure modes:
+
+- Over-expediting can reduce lateness but increase cost/carbon penalties.
+- Greedy rerouting can produce downstream congestion under black swan conditions.
+- Understocked warehouses can create late cascades.
+
+How grading avoids trivial hacks:
+
+- Score is not binary and not a single metric.
+- Delivery count alone cannot maximize score because late/cost penalties remain.
+- High-reward spikes are moderated by normalized task-specific grading.
+- Hard task rewards graceful degradation, not exploit-heavy shortcuts.
+
+## OpenEnv and Deployment Compliance
+
+- Typed Pydantic models for `Observation`, `Action`, and `Reward`.
+- Full API implementation: `step`, `reset`, `state`, and `grade`.
+- `openenv.yaml` includes metadata, tasks, spaces, and validation details.
+- Dockerized for Hugging Face Spaces.
+
+## Environment Variables
+
+Required:
+
+- `API_BASE_URL`
+- `MODEL_NAME`
+- `HF_TOKEN`
+
+Optional:
+
+- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy`, `openai`, `huggingface`)
+- `SUPPLY_CHAIN_TASK`
+- `SUPPLY_CHAIN_HF_MODEL`
+- `SUPPLY_CHAIN_MAX_STEPS`
+
+## Run Locally
+
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Start the API server:
+2. Start server:
 
 ```bash
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-3. In a new terminal, run the baseline agent (set env vars first):
+3. Run baseline inference:
 
 ```bash
 export API_BASE_URL="http://127.0.0.1:8000"
-export MODEL_NAME="gpt-4o-mini"
-export HF_TOKEN="your-token"
+export MODEL_NAME="dummy-model"
+export SUPPLY_CHAIN_AGENT_BACKEND="dummy"
 python inference.py
 ```
 
-**Output format** (Meta spec-compliant):
-```
-[START] task=steady_state env=supply-chain-chaos model=gpt-4o-mini
-[STEP] step=1 action=wait() reward=0.00 done=false error=null
-[STEP] step=2 action=reroute('O1','R1') reward=50.00 done=false error=null
-[END] success=true steps=2 rewards=0.00,50.00
-```
+Structured output follows strict format:
 
-### Reset with Task Preset
-
-```bash
-GET http://127.0.0.1:8000/reset?task=steady_state
-GET http://127.0.0.1:8000/reset?task=port_strike
-GET http://127.0.0.1:8000/reset?task=black_swan
+```text
+[START] task=steady_state env=supply-chain-chaos model=dummy-model
+[STEP] step=1 action=... reward=0.12 done=false error=null
+[END] success=true steps=4 rewards=...
 ```
 
-### Grade an Episode
+## Repository Files
 
-```bash
-GET http://127.0.0.1:8000/grade?task=steady_state
-```
-
-Returns:
-```json
-{
-  "task": "steady_state",
-  "score": 0.85,
-  "delivered": 3,
-  "late": 0,
-  "total_orders": 3,
-  "steps_taken": 15
-}
-```
-
-4. (Optional) Run the evaluation harness:
-
-```bash
-python evaluate.py
-```
-
-This writes `evaluation_results.csv` with metrics across all tasks and backends.
-
-Optional evaluator settings:
-
-```bash
-export SUPPLY_CHAIN_EVAL_STEPS=20
-export SUPPLY_CHAIN_HF_MODEL=google/flan-t5-small
-export SUPPLY_CHAIN_EVAL_CSV=results.csv
-python evaluate.py
-```
-
-5. Turn the CSV into a short report paragraph and bullet list:
-
-```bash
-python generate_results_md.py
-```
-
-Optional report settings:
-
-```bash
-set SUPPLY_CHAIN_EVAL_CSV=results.csv
-set SUPPLY_CHAIN_RESULTS_MD=summary.md
-python generate_results_md.py
-```
-
-## Notes for judges
-
-- Non-deterministic disruptions make the policy robust to uncertainty.
-- Graph-shaped dependencies force relational reasoning.
-- Carbon footprint is included as a real-world tradeoff metric.
-- We incorporate carbon-aware routing to simulate real-world sustainability trade-offs.
-- The design is intentionally compact so it can be validated quickly in a hackathon setting.
+- `env.py`: environment dynamics and reward shaping.
+- `models.py`: typed schemas and presets.
+- `server.py`: API endpoints.
+- `graders.py`: deterministic task graders.
+- `inference.py`: baseline agent runner.
+- `openenv.yaml`: OpenEnv metadata and validation constraints.

@@ -15,12 +15,12 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # Copy application code
 COPY . .
 
-# Expose API port
-EXPOSE 8000
+# Expose API port for Hugging Face Spaces
+EXPOSE 7860
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/', timeout=5)" || exit 1
+    CMD python -c "import requests; requests.get('http://localhost:7860/', timeout=5)" || exit 1
 
 # Run server
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "7860"]

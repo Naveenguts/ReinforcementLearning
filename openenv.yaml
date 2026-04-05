@@ -74,7 +74,7 @@ observation:
       items:
         type: object
         properties:
-          type: {type: string, enum: [route_block, demand_spike, fuel_surge]}
+          type: {type: string, enum: [route_block, demand_spike, fuel_surge, supplier_delay, customs_hold, warehouse_outage]}
           target_id: {type: string, nullable: true}
           magnitude: {type: number}
           description: {type: string}
@@ -124,6 +124,9 @@ reward:
     late_penalties: {type: number}
     storage_fees: {type: number}
     carbon_penalty: {type: number}
+    disruption_penalty:
+      type: number
+      description: Penalty from real-world logistics disruptions (supplier, customs, outage)
     
 # Endpoints required by Meta
 endpoints:

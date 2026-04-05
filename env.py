@@ -316,6 +316,53 @@ class SupplyChainEnv:
                 )
             )
 
+        # Additional real-world disruptions for richer logistics realism.
+        if self.task_name in {TaskName.port_strike, TaskName.black_swan} and self.random.random() < 0.12:
+            active_routes = [route for route in self.state.routes if route.status != RouteStatus.blocked]
+            if active_routes:
+                route = self.random.choice(active_routes)
+                route.lead_time = min(route.lead_time * 1.5, 12.0)
+                route.status = RouteStatus.congested
+                self.state.active_events.append(
+                    ChaosEvent(
+                        type=ChaosEventType.supplier_delay,
+                        target_id=route.id,
+                        magnitude=1.5,
+                        description=f"Supplier delay increases lead time on {route.id}",
+                    )
+                )
+
+        if self.task_name in {TaskName.port_strike, TaskName.black_swan} and self.random.random() < 0.10:
+            in_transit_orders = [order for order in self.state.orders if order.status == OrderStatus.in_transit]
+            if in_transit_orders:
+                order = self.random.choice(in_transit_orders)
+                order.progress = max(order.progress - 0.35, 0.0)
+                self.state.active_events.append(
+                    ChaosEvent(
+                        type=ChaosEventType.customs_hold,
+                        target_id=order.id,
+                        magnitude=0.35,
+                        description=f"Customs hold delays order {order.id}",
+                    )
+                )
+
+        if self.task_name == TaskName.black_swan and self.random.random() < 0.08:
+            warehouse = self.random.choice(self.state.warehouses)
+            lost_stock = max(1, int(warehouse.stock * 0.15))
+            warehouse.stock = max(0, warehouse.stock - lost_stock)
+            for route in self.state.routes:
+                if route.source == warehouse.id and route.status != RouteStatus.blocked:
+                    route.status = RouteStatus.congested
+                    route.lead_time = min(route.lead_time * 1.25, 12.0)
+            self.state.active_events.append(
+                ChaosEvent(
+                    type=ChaosEventType.warehouse_outage,
+                    target_id=warehouse.id,
+                    magnitude=float(lost_stock),
+                    description=f"Warehouse outage at {warehouse.id} reduced stock by {lost_stock}",
+                )
+            )
+
     def _update_late_orders(self) -> None:
         assert self.state is not None
         for order in self.state.orders:
@@ -332,6 +379,15 @@ class SupplyChainEnv:
         late_penalties = 0.0
         storage_fees = 0.0
         carbon_penalty = self.state.carbon_footprint * 0.10
+        disruption_penalty = 0.0
+
+        for event in self.state.active_events:
+            if event.type == ChaosEventType.supplier_delay:
+                disruption_penalty += 4.0
+            elif event.type == ChaosEventType.customs_hold:
+                disruption_penalty += 6.0
+            elif event.type == ChaosEventType.warehouse_outage:
+                disruption_penalty += 8.0
 
         for route in self.state.routes:
             if route.status != RouteStatus.blocked:
@@ -347,7 +403,14 @@ class SupplyChainEnv:
             unused = max(warehouse.stock, 0)
             storage_fees += unused * 0.03
 
-        value = (delivered * 50.0) - (operating_cost * 0.2) - late_penalties - storage_fees - carbon_penalty
+        value = (
+            (delivered * 50.0)
+            - (operating_cost * 0.2)
+            - late_penalties
+            - storage_fees
+            - carbon_penalty
+            - disruption_penalty
+        )
 
         if delivered == total_orders and total_orders > 0:
             latest_due = max(order.due_date for order in self.state.orders)
@@ -366,6 +429,7 @@ class SupplyChainEnv:
             late_penalties=late_penalties,
             storage_fees=storage_fees,
             carbon_penalty=carbon_penalty,
+            disruption_penalty=disruption_penalty,
         )
 
     def _is_done(self) -> bool:

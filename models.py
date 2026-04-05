@@ -57,6 +57,9 @@ class ChaosEventType(str, Enum):
     route_block = "route_block"
     demand_spike = "demand_spike"
     fuel_surge = "fuel_surge"
+    supplier_delay = "supplier_delay"
+    customs_hold = "customs_hold"
+    warehouse_outage = "warehouse_outage"
 
 
 class ChaosEvent(BaseModel):
@@ -159,6 +162,7 @@ class Reward(BaseModel):
     late_penalties: float
     storage_fees: float
     carbon_penalty: float
+    disruption_penalty: float = 0.0
 
 
 class StepResult(BaseModel):
