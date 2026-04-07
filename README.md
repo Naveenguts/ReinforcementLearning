@@ -1,12 +1,13 @@
 # Supply Chain Chaos
 
-Supply Chain Chaos is an OpenEnv-compatible environment for evaluating AI agent behavior in logistics operations under uncertainty. The agent must route shipments, manage stock, and react to disruptions while balancing on-time delivery, cost, and carbon tradeoffs.
+Supply Chain Chaos is a graph-based supply chain environment with deterministic grading and a local Hugging Face agent. It is OpenEnv-compatible and evaluates AI agent behavior in logistics operations under uncertainty. The agent must route shipments, manage stock, and react to disruptions while balancing on-time delivery, cost, and carbon tradeoffs.
 
 ## Why This Is Useful
 
 - Logistics planners regularly face dynamic constraints: blocked routes, delay cascades, and volatile fuel costs.
 - Existing toy benchmarks do not capture order urgency, supply constraints, and operational penalties together.
 - This environment provides a realistic testbed for measuring whether an AI agent is robust, not just correct in ideal conditions.
+- The environment itself is what gets evaluated: the grader scores the resulting state and trajectory, not the prompt text.
 
 ## Environment Summary
 
@@ -15,6 +16,7 @@ Supply Chain Chaos is an OpenEnv-compatible environment for evaluating AI agent 
 - Actions: `wait`, `reroute`, `expedite`, `adjust_stock`.
 - API: `reset()`, `step(action)`, `state()`, plus `grade()` for deterministic task scoring.
 - Tasks: `steady_state` (easy), `port_strike` (medium), `black_swan` (hard).
+- Default seed: `42` for reproducible resets and comparisons.
 
 ## Action Space
 
@@ -56,17 +58,32 @@ Graders are deterministic and return scores in `[0.0, 1.0]`.
 
 | Task | Difficulty | Grader Measures | Deterministic Baseline (dummy backend) |
 | --- | --- | --- | --- |
-| `steady_state` | Easy | Delivery completeness, timeliness, normalized cumulative return | `0.7338` |
-| `port_strike` | Medium | Rerouting resilience under blocked route and cost control | `1.0000` |
-| `black_swan` | Hard | Graceful degradation under cascading disruptions | `0.1279` |
+| `steady_state` | Easy | Delivery completeness, timeliness, normalized cumulative return | `0.5203` |
+| `port_strike` | Medium | Rerouting resilience under blocked route and cost control | `0.9018` |
+| `black_swan` | Hard | Graceful degradation under cascading disruptions | `0.3732` |
 
 Baseline run snapshot:
 
-- `steady_state`: delivered `3/3`, score `0.73`.
-- `port_strike`: delivered `4/4`, score `1.00`.
-- `black_swan`: delivered `1/5`, score `0.13`.
+- `steady_state`: delivered `3/3`, score `0.5203`.
+- `port_strike`: delivered `4/4`, score `0.9018`.
+- `black_swan`: delivered `2/5`, score `0.3732`.
 
 These values show clear task difficulty progression.
+
+## Evaluation Results
+
+Same task presets and default seed (`42`) were used for both backends. The environment, not the prompt text, is the object being graded.
+
+| backend | task | score | delivered | late | final reward | total reward | steps | done |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dummy | steady_state | 0.5203 | 3 | 0 | 172.94 | 110.17 | 4 | True |
+| dummy | port_strike | 0.9018 | 4 | 0 | 224.46 | 365.01 | 6 | True |
+| dummy | black_swan | 0.3732 | 2 | 0 | 85.57 | 98.15 | 5 | True |
+| huggingface | steady_state | 0.7452 | 3 | 0 | 182.59 | 222.61 | 4 | True |
+| huggingface | port_strike | 1.0000 | 4 | 0 | 226.46 | 737.72 | 8 | True |
+| huggingface | black_swan | 0.4109 | 2 | 0 | 0.00 | 135.89 | 20 | False |
+
+At a glance, the local Hugging Face agent improves score on `steady_state` and `port_strike`, while `black_swan` remains the hardest case because the run hits the step limit before completing.
 
 ## Evaluation Protocol Against Realistic Baseline
 
@@ -87,6 +104,8 @@ Recommended comparison metrics:
 - Normalized cumulative reward
 - Failure rate (invalid/no-progress episodes)
 
+For this repo, the fastest evidence is the generated [results.md](results.md) report.
+
 ## Baseline Approach: Production-Grade Heuristic
 
 **The reference solution uses a deterministic logistics heuristic, not an AI model.** This is what real supply chain companies deploy:
@@ -102,6 +121,7 @@ Recommended comparison metrics:
 - Uses proactive expedite for near-deadline in-transit orders
 - Applies stock replenishment from projected near-term demand
 - Falls back gracefully if misconfigured
+- Provides a deterministic fallback when Hugging Face is unavailable
 
 **Baseline performance on deterministic graders:**
 - `steady_state`: score `0.7338` (easy: all 3 orders delivered)
@@ -136,13 +156,13 @@ How grading avoids trivial hacks:
 
 **Hackathon Constraint: Only dummy or huggingface backends are allowed.**
 
-**Primary (Realistic):**
-- `SUPPLY_CHAIN_AGENT_BACKEND=dummy`: Deterministic heuristic (recommended for baseline and comparison)
+**Primary (Demo Default):**
+- `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`: Local LLM proof-of-concept using `google/flan-t5-small`
 
-**Optional (Research-Only):**
-- `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`: Local LLM proof-of-concept (not domain-tuned)
+**Baseline:**
+- `SUPPLY_CHAIN_AGENT_BACKEND=dummy`: Deterministic heuristic for comparison and fallback
 
-Note: If HuggingFace model fails to load, automatically falls back to `dummy` to ensure reproducibility.
+Note: If the Hugging Face model fails to load, the runner automatically falls back to `dummy` to keep the demo reproducible.
 
 ## Environment Variables
 
@@ -153,10 +173,12 @@ Required:
 
 Optional:
 
-- `SUPPLY_CHAIN_AGENT_BACKEND` (`dummy` ← default, `huggingface`)
+- `SUPPLY_CHAIN_AGENT_BACKEND` (`huggingface` ← default, `dummy`)
 - `SUPPLY_CHAIN_TASK` (default: `steady_state`)
 - `SUPPLY_CHAIN_HF_MODEL` (default: `google/flan-t5-small`, HuggingFace only)
 - `SUPPLY_CHAIN_MAX_STEPS` (default: `20`)
+
+The environment defaults to seed `42` for deterministic grading and comparisons.
 
 ## Run Locally
 
@@ -166,25 +188,27 @@ Optional:
 pip install -r requirements.txt
 ```
 
-2. Start server:
+2. Start server with one command:
 
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-3. Run baseline inference:
+3. Run the default demo inference:
 
 ```bash
 export API_BASE_URL="http://127.0.0.1:8000"
-export MODEL_NAME="dummy-model"
-export SUPPLY_CHAIN_AGENT_BACKEND="dummy"
+export SUPPLY_CHAIN_AGENT_BACKEND="huggingface"
+export SUPPLY_CHAIN_HF_MODEL="google/flan-t5-small"
+export HF_TOKEN="your-token"
 python inference.py
 ```
 
 Structured output follows strict format:
 
 ```text
-[START] task=steady_state env=supply-chain-chaos model=dummy-model
+[START] task=steady_state env=supply-chain-chaos model=google/flan-t5-small
+[INFO] backend=huggingface model=google/flan-t5-small loaded=True
 [STEP] step=1 action=... reward=0.12 done=false error=null
 [END] success=true steps=4 rewards=...
 ```

@@ -37,6 +37,7 @@ HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
 class EvalRow:
     backend: str
     task: str
+    score: float
     steps: int
     delivered: int
     late: int
@@ -359,10 +360,13 @@ def run_episode(
     delivered = sum(1 for o in state.get("orders", []) if o.get("status") == "delivered")
     late = sum(1 for o in state.get("orders", []) if o.get("status") == "late")
     inventory_ok = all(int(w.get("stock", 0)) > 0 for w in state.get("warehouses", []))
+    score_response = requests.get(f"{base_url}/grade", params={"task": task}, timeout=30).json()
+    score = float(score_response.get("score", 0.0))
 
     return EvalRow(
         backend=backend,
         task=task,
+        score=score,
         steps=steps,
         delivered=delivered,
         late=late,
@@ -377,6 +381,7 @@ def print_table(rows: List[EvalRow]) -> None:
     headers = [
         "backend",
         "task",
+        "score",
         "steps",
         "delivered",
         "late",
@@ -389,6 +394,7 @@ def print_table(rows: List[EvalRow]) -> None:
         [
             row.backend,
             row.task,
+            f"{row.score:.4f}",
             str(row.steps),
             str(row.delivered),
             str(row.late),
@@ -418,6 +424,7 @@ def write_csv(rows: List[EvalRow], output_path: str) -> None:
     fieldnames = [
         "backend",
         "task",
+        "score",
         "steps",
         "delivered",
         "late",
@@ -434,6 +441,7 @@ def write_csv(rows: List[EvalRow], output_path: str) -> None:
                 {
                     "backend": row.backend,
                     "task": row.task,
+                    "score": f"{row.score:.4f}",
                     "steps": row.steps,
                     "delivered": row.delivered,
                     "late": row.late,

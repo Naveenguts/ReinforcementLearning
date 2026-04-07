@@ -33,7 +33,7 @@ warnings.filterwarnings(
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
-AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "dummy")  # Hackathon: only dummy or huggingface allowed
+AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "huggingface")  # Hackathon: only dummy or huggingface allowed
 HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
 REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
 REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
@@ -489,6 +489,13 @@ def main() -> None:
         reset_response = requests.get(f"{BASE_URL}/reset?task={task_name}", timeout=30)
         reset_response.raise_for_status()
         state = reset_response.json()
+
+        if AGENT_BACKEND == "huggingface":
+            loaded_agent = build_huggingface_agent()
+            print(
+                f"[INFO] backend=huggingface model={HF_MODEL_NAME} loaded={loaded_agent is not None}",
+                flush=True,
+            )
         
         # Main loop
         for step in range(1, MAX_STEPS + 1):

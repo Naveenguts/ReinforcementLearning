@@ -12,6 +12,7 @@ from typing import Dict, List
 class Row:
     backend: str
     task: str
+    score: float
     steps: int
     delivered: int
     late: int
@@ -30,6 +31,7 @@ def load_rows(csv_path: Path) -> List[Row]:
                 Row(
                     backend=str(raw["backend"]),
                     task=str(raw["task"]),
+                    score=float(raw.get("score", 0.0)),
                     steps=int(raw["steps"]),
                     delivered=int(raw["delivered"]),
                     late=int(raw["late"]),
@@ -53,6 +55,7 @@ def summarize(rows: List[Row]) -> str:
         by_task[row.task].append(row)
 
     total_rows = len(rows)
+    avg_score = sum(row.score for row in rows) / total_rows
     avg_final_reward = sum(row.final_reward for row in rows) / total_rows
     avg_total_reward = sum(row.total_reward for row in rows) / total_rows
     total_delivered = sum(row.delivered for row in rows)
@@ -63,24 +66,35 @@ def summarize(rows: List[Row]) -> str:
     lines = []
     lines.append(
         "This evaluation compared the dummy and Hugging Face baselines across the steady_state, port_strike, and black_swan presets. "
-        f"Across {total_rows} runs, the average final reward was {avg_final_reward:.2f} and the average cumulative reward was {avg_total_reward:.2f}. "
+        f"Across {total_rows} runs, the average grader score was {avg_score:.4f}, the average final reward was {avg_final_reward:.2f}, and the average cumulative reward was {avg_total_reward:.2f}. "
         f"The runs delivered {total_delivered} orders in total, incurred {total_late} late orders, kept inventory positive in {inventory_ok_rate:.0%} of runs, and reached termination in {done_rate:.0%} of runs."
     )
     lines.append("")
     lines.append("Key points:")
 
     for backend, backend_rows in sorted(by_backend.items()):
+        avg_score = sum(row.score for row in backend_rows) / len(backend_rows)
         avg_reward = sum(row.final_reward for row in backend_rows) / len(backend_rows)
         avg_delivered = sum(row.delivered for row in backend_rows) / len(backend_rows)
         done_count = sum(1 for row in backend_rows if row.done)
         lines.append(
-            f"- {backend}: average final reward {avg_reward:.2f}, average delivered {avg_delivered:.2f}, completed {done_count}/{len(backend_rows)} runs."
+            f"- {backend}: average score {avg_score:.4f}, average final reward {avg_reward:.2f}, average delivered {avg_delivered:.2f}, completed {done_count}/{len(backend_rows)} runs."
         )
 
     for task, task_rows in sorted(by_task.items()):
         best_row = max(task_rows, key=lambda row: row.final_reward)
         lines.append(
-            f"- {task}: best final reward {best_row.final_reward:.2f} from {best_row.backend}, delivered {best_row.delivered}, late {best_row.late}."
+            f"- {task}: best score {best_row.score:.4f} and final reward {best_row.final_reward:.2f} from {best_row.backend}, delivered {best_row.delivered}, late {best_row.late}."
+        )
+
+    lines.append("")
+    lines.append("Run matrix:")
+    lines.append("")
+    lines.append("| backend | task | score | delivered | late | final reward | total reward | steps | done |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows:
+        lines.append(
+            f"| {row.backend} | {row.task} | {row.score:.4f} | {row.delivered} | {row.late} | {row.final_reward:.2f} | {row.total_reward:.2f} | {row.steps} | {row.done} |"
         )
 
     return "\n".join(lines)
