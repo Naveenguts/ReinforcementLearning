@@ -9,6 +9,7 @@ description = "Meta OpenEnv Supply Chain Chaos environment"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "openenv-core>=0.2.0",
   "fastapi",
   "uvicorn",
   "pydantic",
@@ -17,3 +18,6 @@ dependencies = [
   "torch>=2.0.0",
   "transformers>=4.30.0",
 ]
+
+[project.scripts]
+server = "server_runner:main"
