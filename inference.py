@@ -8,27 +8,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from pydantic import TypeAdapter
+from huggingface_hub import InferenceClient
 
 from models import Action
-
-try:
-    import torch
-    import torch.nn as nn
-except Exception:  # pragma: no cover - optional prototype dependency
-    torch = None
-    nn = None
-
-try:
-    from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer  # pyright: ignore[reportMissingImports]
-except Exception:  # pragma: no cover - optional prototype dependency
-    AutoModelForCausalLM = None
-    AutoModelForSeq2SeqLM = None
-    AutoTokenizer = None
-
-warnings.filterwarnings(
-    "ignore",
-    message=r".*tie shared\.weight to lm_head\.weight.*",
-)
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -42,60 +24,37 @@ hf_agent = None
 ACTION_ADAPTER = TypeAdapter(Action)
 
 
-class PolicyNet(nn.Module if nn is not None else object):
-    def __init__(self, input_size: int = 16, output_size: int = 4) -> None:
-        if nn is None:
-            return
-        super().__init__()
-        self.fc1 = nn.Linear(input_size, 32)
-        self.fc2 = nn.Linear(32, output_size)
-
-    def forward(self, x):
-        if nn is None:
-            raise RuntimeError("PyTorch is not installed")
-        x = torch.relu(self.fc1(x))
-        return self.fc2(x)
-
-
 def build_huggingface_agent():
     global hf_agent
     if hf_agent is not None:
         return hf_agent
-    if AutoTokenizer is None or torch is None:
+    try:
+        hf_agent = HuggingFaceAgentModel(HF_MODEL_NAME, HF_TOKEN)
+        return hf_agent
+    except Exception as e:
+        print(f"[INFO] Failed to initialize HF Inference API: {e}")
         return None
-    hf_agent = HuggingFaceAgentModel(HF_MODEL_NAME)
-    return hf_agent
-
-
-def _is_seq2seq_model(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return any(token in lowered for token in ("flan", "t5", "bart", "pegasus"))
 
 
 class HuggingFaceAgentModel:
-    def __init__(self, model_name: str) -> None:
-        if AutoTokenizer is None or torch is None:
-            raise RuntimeError("transformers or torch is not installed")
+    def __init__(self, model_name: str, hf_token: str) -> None:
         self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.seq2seq = _is_seq2seq_model(model_name)
-        if self.seq2seq:
-            if AutoModelForSeq2SeqLM is None:
-                raise RuntimeError("Seq2Seq model class is unavailable")
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-        else:
-            if AutoModelForCausalLM is None:
-                raise RuntimeError("Causal LM model class is unavailable")
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        if hasattr(self.model, "config") and hasattr(self.model.config, "tie_word_embeddings"):
-            self.model.config.tie_word_embeddings = False
-        self.model.eval()
+        self.client = InferenceClient(api_key=hf_token)
+        print(f"[INFO] HuggingFace Inference API client initialized for model: {model_name}")
 
     def generate(self, prompt: str) -> str:
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        with torch.no_grad():
-            output_ids = self.model.generate(**inputs, max_new_tokens=64, do_sample=False)
-        return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        try:
+            response = self.client.text_generation(
+                model=self.model_name,
+                prompt=prompt,
+                max_new_tokens=64,
+                do_sample=False,
+                temperature=0.1
+            )
+            return response
+        except Exception as e:
+            print(f"[ERROR] HF API inference failed: {e}")
+            return json.dumps({"type": "wait"})
 
 
 # OpenAI backend removed: hackathon constraint allows only dummy or huggingface
