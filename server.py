@@ -16,6 +16,7 @@ def root() -> dict:
 
 
 @app.get("/reset")
+@app.post("/reset")
 def reset(task: TaskName = TaskName.steady_state) -> dict:
     observation = env.reset(task)
     return observation.model_dump()
