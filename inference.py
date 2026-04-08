@@ -3,33 +3,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import warnings
 from typing import Any, Dict, List, Optional
 
 import requests
+from openai import OpenAI
 from pydantic import TypeAdapter
 
 from models import Action
 
-try:
-    import torch
-    import torch.nn as nn
-except Exception:
-    torch = None
-    nn = None
-
-try:
-    from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
-except Exception:
-    AutoModelForCausalLM = None
-    AutoModelForSeq2SeqLM = None
-    AutoTokenizer = None
-
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
+MODEL_NAME = os.getenv("MODEL_NAME", "google/flan-t5-small")
+HF_TOKEN = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
 AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "dummy")  # Default: dummy (no dependencies)
-HF_MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", "google/flan-t5-small")
 REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
 REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
 
@@ -37,69 +24,52 @@ hf_agent = None
 ACTION_ADAPTER = TypeAdapter(Action)
 
 
-class PolicyNet(nn.Module if nn is not None else object):
-    def __init__(self, input_size: int = 16, output_size: int = 4) -> None:
-        if nn is None:
-            return
-        super().__init__()
-        self.fc1 = nn.Linear(input_size, 32)
-        self.fc2 = nn.Linear(32, output_size)
-
-    def forward(self, x):
-        if nn is None:
-            raise RuntimeError("PyTorch is not installed")
-        x = torch.relu(self.fc1(x))
-        return self.fc2(x)
-
-
 def build_huggingface_agent():
     global hf_agent
     if hf_agent is not None:
         return hf_agent
-    if AutoTokenizer is None or torch is None:
-        print("[INFO] HF dependencies not available, falling back to dummy")
+    if not HF_TOKEN:
+        print("[INFO] HF_TOKEN is not set, falling back to dummy")
         return None
     try:
-        hf_agent = HuggingFaceAgentModel(HF_MODEL_NAME)
-        print(f"[INFO] Loaded HuggingFace model: {HF_MODEL_NAME}")
+        hf_agent = HuggingFaceAgentModel(base_url=BASE_URL, model_name=MODEL_NAME, hf_token=HF_TOKEN)
+        print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}")
         return hf_agent
     except Exception as e:
-        print(f"[INFO] Failed to load HF model: {e}, using dummy backend")
+        print(f"[INFO] Failed to initialize OpenAI client: {e}, using dummy backend")
         return None
-
-
-def _is_seq2seq_model(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return any(token in lowered for token in ("flan", "t5", "bart", "pegasus"))
 
 
 class HuggingFaceAgentModel:
-    def __init__(self, model_name: str) -> None:
-        if AutoTokenizer is None or torch is None:
-            raise RuntimeError("transformers or torch is not installed")
+    def __init__(self, base_url: str, model_name: str, hf_token: str) -> None:
+        self.base_url = base_url.rstrip("/")
         self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.seq2seq = _is_seq2seq_model(model_name)
-        if self.seq2seq:
-            if AutoModelForSeq2SeqLM is None:
-                raise RuntimeError("Seq2Seq model class is unavailable")
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-        else:
-            if AutoModelForCausalLM is None:
-                raise RuntimeError("Causal LM model class is unavailable")
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        if hasattr(self.model, "config") and hasattr(self.model.config, "tie_word_embeddings"):
-            self.model.config.tie_word_embeddings = False
-        self.model.eval()
+        self.client = OpenAI(
+            api_key=hf_token,
+            base_url=f"{self.base_url}/v1",
+        )
 
     def generate(self, prompt: str) -> str:
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        with torch.no_grad():
-            output_ids = self.model.generate(**inputs, max_new_tokens=64, do_sample=False)
-        return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        completion = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a strict JSON action generator. Reply with a single JSON object only.",
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        content = completion.choices[0].message.content
+        return content or '{"type":"wait"}'
 
 
-# OpenAI backend removed: hackathon constraint allows only dummy or huggingface
+# Hackathon constraint: only dummy or huggingface backends are allowed.
 
 
 def build_prompt(
@@ -476,7 +446,7 @@ def main() -> None:
     """Main entry point following Meta's [START] [STEP] [END] format."""
     task_name = os.getenv("SUPPLY_CHAIN_TASK", "steady_state")
     benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
-    model_label = HF_MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
+    model_label = MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
     
     log_start(task=task_name, env=benchmark_name, model=model_label)
     
@@ -494,7 +464,7 @@ def main() -> None:
         if AGENT_BACKEND == "huggingface":
             loaded_agent = build_huggingface_agent()
             print(
-                f"[INFO] backend=huggingface model={HF_MODEL_NAME} loaded={loaded_agent is not None}",
+                f"[INFO] backend=huggingface model={MODEL_NAME} loaded={loaded_agent is not None}",
                 flush=True,
             )
         
