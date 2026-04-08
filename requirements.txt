@@ -2,4 +2,5 @@ fastapi
 uvicorn
 pydantic
 requests
-huggingface-hub>=0.16.0
+torch>=2.0.0
+transformers>=4.30.0
