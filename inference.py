@@ -42,10 +42,12 @@ def build_huggingface_agent():
 
 class HuggingFaceAgentModel:
     def __init__(self, base_url: str, model_name: str, api_key: str) -> None:
-        self.base_url = base_url.rstrip("/")
+        resolved_base_url = os.environ.get("API_BASE_URL", base_url)
+        resolved_api_key = os.environ.get("API_KEY", api_key)
+        self.base_url = resolved_base_url.rstrip("/")
         self.model_name = model_name
         self.client = OpenAI(
-            api_key=api_key,
+            api_key=resolved_api_key,
             base_url=f"{self.base_url}/v1",
         )
 
@@ -361,6 +363,17 @@ def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
         return choose_dummy_action(state)
 
     if AGENT_BACKEND == "huggingface":
+        agent = build_huggingface_agent()
+        if agent is not None:
+            try:
+                route_candidates, focus_order_id = build_route_candidates(state)
+                prompt = build_prompt(state, route_candidates, focus_order_id)
+                generated = agent.generate(prompt)
+                action = safe_action(parse_action(generated), state)
+                return enforce_route_candidates(action, route_candidates, focus_order_id)
+            except Exception as e:
+                print(f"[INFO] LLM generation failed: {e}, using heuristic fallback", flush=True)
+
         emergency = emergency_override(state)
         if emergency is not None:
             return safe_action(emergency, state)
@@ -369,13 +382,6 @@ def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
         if heuristic is not None:
             return safe_action(heuristic, state)
 
-        agent = build_huggingface_agent()
-        if agent is not None:
-            route_candidates, focus_order_id = build_route_candidates(state)
-            prompt = build_prompt(state, route_candidates, focus_order_id)
-            generated = agent.generate(prompt)
-            action = safe_action(parse_action(generated), state)
-            return enforce_route_candidates(action, route_candidates, focus_order_id)
         # HuggingFace model failed to load; fall back to dummy
         return choose_dummy_action(state)
 
