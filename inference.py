@@ -12,11 +12,11 @@ from pydantic import TypeAdapter
 from models import Action
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-MODEL_NAME = os.getenv("MODEL_NAME", "google/flan-t5-small")
-HF_TOKEN = os.getenv("HF_TOKEN")
+MODEL_NAME = os.getenv("SUPPLY_CHAIN_HF_MODEL", os.getenv("MODEL_NAME", "google/flan-t5-small"))
+API_KEY = os.getenv("API_KEY")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
-AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "dummy")  # Default: dummy (no dependencies)
+AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "huggingface")
 REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
 REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
 
@@ -28,11 +28,11 @@ def build_huggingface_agent():
     global hf_agent
     if hf_agent is not None:
         return hf_agent
-    if not HF_TOKEN:
-        print("[INFO] HF_TOKEN is not set, falling back to dummy")
+    if not API_KEY:
+        print("[INFO] API_KEY is not set, falling back to dummy")
         return None
     try:
-        hf_agent = HuggingFaceAgentModel(base_url=BASE_URL, model_name=MODEL_NAME, hf_token=HF_TOKEN)
+        hf_agent = HuggingFaceAgentModel(base_url=BASE_URL, model_name=MODEL_NAME, api_key=API_KEY)
         print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}")
         return hf_agent
     except Exception as e:
@@ -41,11 +41,11 @@ def build_huggingface_agent():
 
 
 class HuggingFaceAgentModel:
-    def __init__(self, base_url: str, model_name: str, hf_token: str) -> None:
+    def __init__(self, base_url: str, model_name: str, api_key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.client = OpenAI(
-            api_key=hf_token,
+            api_key=api_key,
             base_url=f"{self.base_url}/v1",
         )
 

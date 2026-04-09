@@ -169,7 +169,7 @@ Note: If the Hugging Face model fails to load, the runner automatically falls ba
 Required:
 
 - `API_BASE_URL`
-- `HF_TOKEN` (only if using `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`)
+- `API_KEY` (required for `SUPPLY_CHAIN_AGENT_BACKEND=huggingface`)
 
 Optional:
 
@@ -198,9 +198,9 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 
 ```bash
 export API_BASE_URL="http://127.0.0.1:8000"
+export API_KEY="your-proxy-key"
 export SUPPLY_CHAIN_AGENT_BACKEND="huggingface"
 export SUPPLY_CHAIN_HF_MODEL="google/flan-t5-small"
-export HF_TOKEN="your-token"
 python inference.py
 ```
 

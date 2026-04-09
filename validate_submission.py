@@ -103,7 +103,7 @@ def check_env_vars_in_inference() -> Tuple[bool, List[str]]:
         with open("inference.py", "r") as f:
             content = f.read()
         
-        required_vars = ["API_BASE_URL", "MODEL_NAME", "HF_TOKEN"]
+        required_vars = ["API_BASE_URL", "API_KEY", "SUPPLY_CHAIN_HF_MODEL"]
         found_vars = []
         
         for var in required_vars:
