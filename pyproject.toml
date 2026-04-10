@@ -14,7 +14,7 @@ dependencies = [
   "uvicorn",
   "pydantic",
   "requests",
-  "openai",
+  "openai>=2.30.0",
   "torch>=2.0.0",
   "transformers>=4.30.0",
 ]
