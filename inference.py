@@ -13,8 +13,9 @@ from models import Action
 
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 _API_KEY_ENV = os.getenv("API_KEY", "")
-_HF_MODEL_ENV = os.getenv("SUPPLY_CHAIN_HF_MODEL", "gpt-4o-mini")
-MODEL_NAME = "gpt-4o-mini"
+_HF_MODEL_ENV = os.getenv("SUPPLY_CHAIN_HF_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("API_KEY", ""))
+MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("SUPPLY_CHAIN_HF_MODEL", "Qwen/Qwen2.5-3B-Instruct"))
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
 AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "huggingface")
@@ -32,10 +33,12 @@ def build_huggingface_agent():
     global hf_agent
     if hf_agent is not None:
         return hf_agent
+    if not HF_TOKEN:
+        raise RuntimeError("Missing HF_TOKEN (or API_KEY fallback) for OpenAI client initialization")
     hf_agent = HuggingFaceAgentModel(
         base_url=os.environ["API_BASE_URL"],
         model_name=MODEL_NAME,
-        api_key=os.environ["API_KEY"],
+        api_key=HF_TOKEN,
     )
     print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}", flush=True)
     return hf_agent
