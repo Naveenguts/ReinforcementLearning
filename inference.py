@@ -11,11 +11,11 @@ from pydantic import TypeAdapter
 
 from models import Action
 
-BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-_API_KEY_ENV = os.getenv("API_KEY", "")
-_HF_MODEL_ENV = os.getenv("SUPPLY_CHAIN_HF_MODEL", "Qwen/Qwen2.5-3B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("API_KEY", ""))
-MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("SUPPLY_CHAIN_HF_MODEL", "Qwen/Qwen2.5-3B-Instruct"))
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = HF_TOKEN or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY", "")
+ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 MAX_STEPS = int(os.getenv("SUPPLY_CHAIN_MAX_STEPS", "20"))
 AGENT_BACKEND = os.getenv("SUPPLY_CHAIN_AGENT_BACKEND", "huggingface")
@@ -33,12 +33,12 @@ def build_huggingface_agent():
     global hf_agent
     if hf_agent is not None:
         return hf_agent
-    if not HF_TOKEN:
+    if not API_KEY:
         raise RuntimeError("Missing HF_TOKEN (or API_KEY fallback) for OpenAI client initialization")
     hf_agent = HuggingFaceAgentModel(
-        base_url=os.environ["API_BASE_URL"],
+        base_url=API_BASE_URL,
         model_name=MODEL_NAME,
-        api_key=HF_TOKEN,
+        api_key=API_KEY,
     )
     print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}", flush=True)
     return hf_agent
@@ -419,10 +419,13 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     """Emit [END] line per Meta spec."""
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 def action_to_string(action: Dict[str, Any]) -> str:
@@ -473,12 +476,13 @@ def main() -> None:
     
     rewards: List[float] = []
     steps_taken = 0
+    score = 0.0
     success = False
     last_error: Optional[str] = None
     
     try:
         # Reset and get initial state
-        reset_response = requests.get(f"{BASE_URL}/reset?task={task_name}", timeout=30)
+        reset_response = requests.get(f"{ENV_URL}/reset?task={task_name}", timeout=30)
         reset_response.raise_for_status()
         state = reset_response.json()
 
@@ -497,7 +501,7 @@ def main() -> None:
                 action_str = action_to_string(action)
                 
                 # Step environment
-                step_response = requests.post(f"{BASE_URL}/step", json=action, timeout=30)
+                step_response = requests.post(f"{ENV_URL}/step", json=action, timeout=30)
                 step_response.raise_for_status()
                 result = step_response.json()
                 
@@ -522,25 +526,28 @@ def main() -> None:
                     
             except Exception as step_error:
                 last_error = str(step_error)
-                log_step(
-                    step=step,
-                    action="error",
-                    reward=0.0,
-                    done=True,
-                    error=last_error
-                )
                 break
         
-        # Determine success from final delivery outcomes.
-        success = is_success_state(state)
+        # Pull normalized score expected by evaluator, then clamp to [0, 1].
+        try:
+            grade_response = requests.get(f"{ENV_URL}/grade", params={"task": task_name}, timeout=30)
+            grade_response.raise_for_status()
+            score = float(grade_response.json().get("score", 0.0))
+        except Exception:
+            score = 0.0
+        score = max(0.0, min(1.0, score))
+
+        # Keep success strict and deterministic for this benchmark.
+        success = is_success_state(state) and score > 0.0 and last_error is None
         
     except Exception as exc:
         last_error = str(exc)
         success = False
+        score = 0.0
     
     finally:
         # Always emit [END]
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 if __name__ == "__main__":
