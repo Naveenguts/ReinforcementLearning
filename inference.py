@@ -12,7 +12,7 @@ from pydantic import TypeAdapter
 from models import Action
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME") or os.getenv("SUPPLY_CHAIN_HF_MODEL", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
 API_KEY = HF_TOKEN or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY", "")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
@@ -466,22 +466,38 @@ def is_success_state(state: Dict[str, Any]) -> bool:
     return delivered == len(orders) and late == 0
 
 
-def main() -> None:
-    """Main entry point following Meta's [START] [STEP] [END] format."""
-    task_name = os.getenv("SUPPLY_CHAIN_TASK", "steady_state")
-    benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
-    model_label = MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
-    
+def _task_sequence() -> List[str]:
+    """Resolve which tasks to run for this invocation.
+
+    Priority:
+    1) SUPPLY_CHAIN_TASKS comma-separated list
+    2) SUPPLY_CHAIN_TASK single task
+    3) default full benchmark trio (ensures task coverage in validators)
+    """
+    tasks_csv = os.getenv("SUPPLY_CHAIN_TASKS", "").strip()
+    if tasks_csv:
+        tasks = [t.strip() for t in tasks_csv.split(",") if t.strip()]
+        if tasks:
+            return tasks
+
+    single_task = os.getenv("SUPPLY_CHAIN_TASK", "").strip()
+    if single_task:
+        return [single_task]
+
+    return ["steady_state", "port_strike", "black_swan"]
+
+
+def run_episode(task_name: str, benchmark_name: str, model_label: str) -> None:
+    """Run one task episode and emit exactly one START...END block."""
     log_start(task=task_name, env=benchmark_name, model=model_label)
-    
+
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
     success = False
     last_error: Optional[str] = None
-    
+
     try:
-        # Reset and get initial state
         reset_response = requests.get(f"{ENV_URL}/reset?task={task_name}", timeout=30)
         reset_response.raise_for_status()
         state = reset_response.json()
@@ -492,43 +508,37 @@ def main() -> None:
                 f"[INFO] backend=huggingface model={MODEL_NAME} loaded={loaded_agent is not None}",
                 flush=True,
             )
-        
-        # Main loop
+
         for step in range(1, MAX_STEPS + 1):
             try:
-                # Choose action
-                action = choose_action(state)
+                if AGENT_BACKEND == "dummy":
+                    action = choose_dummy_action(state)
+                else:
+                    action = choose_action(state)
                 action_str = action_to_string(action)
-                
-                # Step environment
+
                 step_response = requests.post(f"{ENV_URL}/step", json=action, timeout=30)
                 step_response.raise_for_status()
                 result = step_response.json()
-                
-                # Extract and normalize reward for Meta-compliant logging.
+
                 raw_reward = float(result.get("reward", {}).get("value", 0.0))
                 reward_value = normalize_reward(raw_reward)
                 done = result.get("done", False)
                 error = None
-                
+
                 rewards.append(reward_value)
                 steps_taken = step
-                
-                # Log step
+
                 log_step(step=step, action=action_str, reward=reward_value, done=done, error=error)
-                
-                # Update state
+
                 state = result.get("observation", state)
-                
-                # Check if episode is done
                 if done:
                     break
-                    
+
             except Exception as step_error:
                 last_error = str(step_error)
                 break
-        
-        # Pull normalized score expected by evaluator, then clamp to [0, 1].
+
         try:
             grade_response = requests.get(f"{ENV_URL}/grade", params={"task": task_name}, timeout=30)
             grade_response.raise_for_status()
@@ -536,18 +546,24 @@ def main() -> None:
         except Exception:
             score = 0.0
         score = max(0.0, min(1.0, score))
-
-        # Keep success strict and deterministic for this benchmark.
         success = is_success_state(state) and score > 0.0 and last_error is None
-        
+
     except Exception as exc:
         last_error = str(exc)
         success = False
         score = 0.0
-    
+
     finally:
-        # Always emit [END]
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+
+def main() -> None:
+    """Main entry point following Meta's [START] [STEP] [END] format."""
+    benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
+    model_label = MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
+
+    for task_name in _task_sequence():
+        run_episode(task_name=task_name, benchmark_name=benchmark_name, model_label=model_label)
 
 
 if __name__ == "__main__":
