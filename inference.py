@@ -47,7 +47,7 @@ class HuggingFaceAgentModel:
         self.model_name = model_name
         self.client = OpenAI(
             api_key=api_key,
-            base_url=f"{self.base_url}/v1",
+            base_url=self.base_url,
         )
 
     def generate(self, prompt: str) -> str:
