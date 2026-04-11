@@ -18,7 +18,7 @@ from typing import List
 from models import Order, OrderStatus, TaskName
 
 
-def _constrain_score(score: float, epsilon: float = 0.001) -> float:
+def _constrain_score(score: float, epsilon: float = 0.0001) -> float:
     """
     Constrain score to strictly between 0 and 1 (exclusive bounds).
     
@@ -26,8 +26,8 @@ def _constrain_score(score: float, epsilon: float = 0.001) -> float:
     - score > 0 and score < 1 (never exactly 0.0 or 1.0)
     - Linear scaling: 0.5 maps to 0.5, 0 maps to epsilon, 1 maps to 1-epsilon
     """
-    clamped = max(0.0, min(score, 1.0))
-    return epsilon + (1.0 - 2.0 * epsilon) * clamped
+    clamped = max(0.0, min(float(score), 1.0))
+    return epsilon + (clamped * (1.0 - 2.0 * epsilon))
 
 
 # Max possible score represents perfect performance on each task
@@ -93,11 +93,11 @@ class SteadyStateGrader(TaskGrader):
         total = len(orders)
 
         if total == 0:
-            return 0.0
+            return _constrain_score(0.0)
 
         # Reward-based normalization
         max_reward = MAX_REWARD_BY_TASK.get(task_name, 350.0)
-        reward_score = min(final_reward / max_reward, 1.0)
+        reward_score = max(0.0, min(float(final_reward) / max_reward, 1.0))
 
         # Order-based metrics as secondary validation
         delivered_ratio = min(delivered / total, 1.0)
@@ -131,11 +131,11 @@ class PortStrikeGrader(TaskGrader):
         total = len(orders)
 
         if total == 0:
-            return 0.0
+            return _constrain_score(0.0)
 
         # Reward-based normalization
         max_reward = MAX_REWARD_BY_TASK.get(task_name, 420.0)
-        reward_score = min(final_reward / max_reward, 1.0)
+        reward_score = max(0.0, min(float(final_reward) / max_reward, 1.0))
 
         # Order-based metrics
         delivered_ratio = min(delivered / total, 1.0)
@@ -169,11 +169,11 @@ class BlackSwanGrader(TaskGrader):
         total = len(orders)
 
         if total == 0:
-            return 0.0
+            return _constrain_score(0.0)
 
         # Reward-based normalization (primary for hard task)
         max_reward = MAX_REWARD_BY_TASK.get(task_name, 500.0)
-        reward_score = min(final_reward / max_reward, 1.0)
+        reward_score = max(0.0, min(float(final_reward) / max_reward, 1.0))
 
         # Order-based graceful degradation scale
         # 5→1.0, 4→0.90, 3→0.75, 2→0.55, 1→0.30, 0→0.0
