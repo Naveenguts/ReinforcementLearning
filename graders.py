@@ -18,6 +18,18 @@ from typing import List
 from models import Order, OrderStatus, TaskName
 
 
+def _constrain_score(score: float, epsilon: float = 0.001) -> float:
+    """
+    Constrain score to strictly between 0 and 1 (exclusive bounds).
+    
+    Maps [0, 1] to (epsilon, 1-epsilon) to ensure:
+    - score > 0 and score < 1 (never exactly 0.0 or 1.0)
+    - Linear scaling: 0.5 maps to 0.5, 0 maps to epsilon, 1 maps to 1-epsilon
+    """
+    clamped = max(0.0, min(score, 1.0))
+    return epsilon + (1.0 - 2.0 * epsilon) * clamped
+
+
 # Max possible score represents perfect performance on each task
 MAX_REWARD_BY_TASK = {
     TaskName.steady_state: 350.0,    # 3 orders × 50 + early bonus 50 + misc 100 = ~300-350
@@ -93,7 +105,7 @@ class SteadyStateGrader(TaskGrader):
 
         # Blend: 70% reward, 30% order metrics
         blended = (0.7 * reward_score) + (0.3 * (delivered_ratio - late_penalty))
-        return max(0.0, min(blended, 1.0))
+        return _constrain_score(blended)
 
 
 class PortStrikeGrader(TaskGrader):
@@ -131,7 +143,7 @@ class PortStrikeGrader(TaskGrader):
 
         # Medium task: reward weighted higher (difficulty spike)
         blended = (0.75 * reward_score) + (0.25 * (delivered_ratio - late_penalty))
-        return max(0.0, min(blended, 1.0))
+        return _constrain_score(blended)
 
 
 class BlackSwanGrader(TaskGrader):
@@ -174,7 +186,7 @@ class BlackSwanGrader(TaskGrader):
 
         # Hard task: equal weight on reward vs graceful degradation
         blended = (0.5 * reward_score) + (0.5 * (order_score - late_penalty))
-        return max(0.0, min(blended, 1.0))
+        return _constrain_score(blended)
 
 
 def grade_task(
