@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 import requests
 from openai import OpenAI
@@ -23,25 +23,51 @@ REWARD_MIN = float(os.getenv("SUPPLY_CHAIN_REWARD_MIN", "-50"))
 REWARD_MAX = float(os.getenv("SUPPLY_CHAIN_REWARD_MAX", "200"))
 LOW_STOCK_THRESHOLD = int(os.getenv("LOW_STOCK_THRESHOLD", "40"))
 LLM_MAX_RETRIES = int(os.getenv("SUPPLY_CHAIN_LLM_RETRIES", "2"))
+STEP_MAX_RETRIES = int(os.getenv("SUPPLY_CHAIN_STEP_RETRIES", "1"))
 
-hf_agent = None
-llm_call_emitted = False
 ACTION_ADAPTER = TypeAdapter(Action)
 
 
-def build_huggingface_agent():
-    global hf_agent
-    if hf_agent is not None:
-        return hf_agent
-    if not API_KEY:
-        raise RuntimeError("Missing HF_TOKEN (or API_KEY fallback) for OpenAI client initialization")
-    hf_agent = HuggingFaceAgentModel(
-        base_url=API_BASE_URL,
-        model_name=MODEL_NAME,
-        api_key=API_KEY,
-    )
-    print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}", flush=True)
-    return hf_agent
+class WarehouseState(TypedDict, total=False):
+    id: str
+    stock: int
+    capacity: int
+
+
+class RouteState(TypedDict, total=False):
+    id: str
+    source: str
+    destination: str
+    lead_time: float
+    cost: float
+    status: str
+
+
+class OrderState(TypedDict, total=False):
+    id: str
+    origin: str
+    destination: str
+    quantity: int
+    due_date: int
+    route_id: Optional[str]
+    status: str
+    progress: float
+
+
+class ChaosEventState(TypedDict, total=False):
+    type: str
+    target_id: Optional[str]
+    magnitude: float
+    description: str
+
+
+class EnvState(TypedDict, total=False):
+    task_name: str
+    time_step: int
+    warehouses: List[WarehouseState]
+    routes: List[RouteState]
+    orders: List[OrderState]
+    active_events: List[ChaosEventState]
 
 
 class HuggingFaceAgentModel:
@@ -57,7 +83,6 @@ class HuggingFaceAgentModel:
         last_error: Exception | None = None
         for attempt in range(max(1, LLM_MAX_RETRIES)):
             try:
-                print("[DEBUG] Calling LLM via proxy...", flush=True)
                 completion = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[
@@ -72,6 +97,7 @@ class HuggingFaceAgentModel:
                     ],
                     temperature=0.2,
                     max_tokens=120,
+                    stop=["\n```", "```", "\n\n"],
                 )
                 content = completion.choices[0].message.content
                 return content or '{"type":"wait"}'
@@ -84,14 +110,66 @@ class HuggingFaceAgentModel:
         return '{"type":"wait"}'
 
 
-# Hackathon constraint: only dummy or huggingface backends are allowed.
+# Compliance: only competition-approved backends are allowed.
+
+
+class SupplyChainAgent:
+    """Stateful agent wrapper to avoid mutable module-level inference state."""
+
+    def __init__(self) -> None:
+        self.hf_agent: Optional[HuggingFaceAgentModel] = None
+        self.llm_call_emitted = False
+
+    def build_huggingface_agent(self) -> HuggingFaceAgentModel:
+        if self.hf_agent is not None:
+            return self.hf_agent
+        if not API_KEY:
+            raise RuntimeError("Missing HF_TOKEN (or API_KEY fallback) for OpenAI client initialization")
+        self.hf_agent = HuggingFaceAgentModel(
+            base_url=API_BASE_URL,
+            model_name=MODEL_NAME,
+            api_key=API_KEY,
+        )
+        print(f"[INFO] OpenAI client initialized for model: {MODEL_NAME}", flush=True)
+        return self.hf_agent
+
+    def choose_action(self, state: EnvState) -> Dict[str, Any]:
+        """Choose action with deterministic safety guards and strict schema fallback."""
+        agent = self.build_huggingface_agent()
+        if not self.llm_call_emitted:
+            # Ensure at least one proxy-observable LLM call even if rule overrides trigger.
+            agent.generate('Return only JSON: {"type":"wait"}')
+            self.llm_call_emitted = True
+
+        emergency = emergency_override(state)
+        if emergency:
+            return emergency
+
+        heuristic = heuristic_action(state)
+        if heuristic:
+            return heuristic
+
+        route_candidates, focus_order_id = build_route_candidates(state)
+        prompt = build_prompt(state, route_candidates, focus_order_id)
+        generated = agent.generate(prompt)
+        action = safe_action(parse_action(generated), state)
+        return enforce_route_candidates(action, route_candidates, focus_order_id)
+
+
+_COMPAT_AGENT_RUNTIME = SupplyChainAgent()
+
+
+def build_huggingface_agent() -> HuggingFaceAgentModel:
+    """Compatibility wrapper preserving the original module-level function name."""
+    return _COMPAT_AGENT_RUNTIME.build_huggingface_agent()
 
 
 def build_prompt(
-    state: Dict[str, Any],
+    state: EnvState,
     route_candidates: Dict[str, List[str]] | None = None,
     focus_order_id: str | None = None,
 ) -> str:
+    """Build the structured prompt used to steer the LLM toward safe actions."""
     formatted_state = format_state(state)
     candidate_text = ""
     if route_candidates:
@@ -111,12 +189,13 @@ def build_prompt(
         "1. Deliver ALL orders before due date\n"
         "2. NEVER allow late orders\n"
         "3. Expedite if any risk of delay\n"
-        "4. Use fastest route (low lead_time)\n"
+        "4. Minimize carbon footprint by choosing efficient routes\n"
         "5. Keep warehouse stock >= 40 when possible\n\n"
         "CRITICAL RULES:\n"
         "- If due_date <= current_step+1 -> MUST expedite\n"
         "- If route blocked -> MUST reroute immediately\n"
         "- If stock < 40 -> adjust_stock\n"
+        "- Prioritize high-quantity orders during fuel surges to optimize cost-per-unit\n"
         "- Never return invalid JSON\n\n"
         "Return ONLY JSON:\n"
         "{\"type\": \"wait\"} OR "
@@ -129,7 +208,7 @@ def build_prompt(
     )
 
 
-def format_state(state: Dict[str, Any]) -> str:
+def format_state(state: EnvState) -> str:
     lines = [f"Task: {state.get('task_name', 'unknown')} | Step: {state.get('time_step', 0)}"]
     lines.append("Warehouses:")
     for warehouse in state.get("warehouses", []):
@@ -188,7 +267,7 @@ def safe_action(action: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]
         return choose_dummy_action(state)
 
 
-def heuristic_action(state: Dict[str, Any]) -> Dict[str, Any] | None:
+def heuristic_action(state: EnvState) -> Dict[str, Any] | None:
     low_stock_warehouses = [
         warehouse
         for warehouse in state.get("warehouses", [])
@@ -206,7 +285,7 @@ def heuristic_action(state: Dict[str, Any]) -> Dict[str, Any] | None:
     return None
 
 
-def emergency_override(state: Dict[str, Any]) -> Dict[str, Any] | None:
+def emergency_override(state: EnvState) -> Dict[str, Any] | None:
     current_step = int(state.get("time_step", 0))
     urgent_orders = [
         order
@@ -225,7 +304,7 @@ def emergency_override(state: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
-def choose_dummy_action(state: Dict[str, Any]) -> Dict[str, Any]:
+def choose_dummy_action(state: EnvState) -> Dict[str, Any]:
     current_step = int(state.get("time_step", 0))
     routes = [route for route in state.get("routes", []) if route.get("status") != "blocked"]
 
@@ -301,7 +380,7 @@ def choose_dummy_action(state: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "wait"}
 
 
-def _select_focus_order(state: Dict[str, Any]) -> Dict[str, Any] | None:
+def _select_focus_order(state: EnvState) -> Dict[str, Any] | None:
     pending_orders = [
         order
         for order in state.get("orders", [])
@@ -319,7 +398,7 @@ def _select_focus_order(state: Dict[str, Any]) -> Dict[str, Any] | None:
     return sorted(pending_orders, key=sort_key)[0]
 
 
-def _rank_route_candidates_for_order(order: Dict[str, Any], state: Dict[str, Any], limit: int = 3) -> List[str]:
+def _rank_route_candidates_for_order(order: Dict[str, Any], state: EnvState, limit: int = 3) -> List[str]:
     origin = order.get("origin")
     destination = order.get("destination")
     scored: List[tuple[float, str]] = []
@@ -341,7 +420,7 @@ def _rank_route_candidates_for_order(order: Dict[str, Any], state: Dict[str, Any
     return [route_id for _, route_id in scored[:limit]]
 
 
-def build_route_candidates(state: Dict[str, Any]) -> tuple[Dict[str, List[str]], str | None]:
+def build_route_candidates(state: EnvState) -> tuple[Dict[str, List[str]], str | None]:
     focus_order = _select_focus_order(state)
     if focus_order is None:
         return {}, None
@@ -380,28 +459,9 @@ def enforce_route_candidates(
     return action
 
 
-def choose_action(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Choose action using allowed backends: dummy or huggingface (per hackathon constraint)."""
-    global llm_call_emitted
-    agent = build_huggingface_agent()
-    if not llm_call_emitted:
-        # Ensure at least one proxy-observable LLM call even if rule overrides trigger.
-        agent.generate('Return only JSON: {"type":"wait"}')
-        llm_call_emitted = True
-
-    emergency = emergency_override(state)
-    if emergency:
-        return emergency
-
-    heuristic = heuristic_action(state)
-    if heuristic:
-        return heuristic
-
-    route_candidates, focus_order_id = build_route_candidates(state)
-    prompt = build_prompt(state, route_candidates, focus_order_id)
-    generated = agent.generate(prompt)
-    action = safe_action(parse_action(generated), state)
-    return enforce_route_candidates(action, route_candidates, focus_order_id)
+def choose_action(state: EnvState, agent_runtime: SupplyChainAgent) -> Dict[str, Any]:
+    """Compatibility wrapper for class-based action selection."""
+    return agent_runtime.choose_action(state)
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -456,7 +516,7 @@ def normalize_reward(raw_reward: float) -> float:
     return max(0.0, min(1.0, normalized))
 
 
-def is_success_state(state: Dict[str, Any]) -> bool:
+def is_success_state(state: EnvState) -> bool:
     """Episode is successful when all orders are delivered and none are late."""
     orders = state.get("orders", [])
     if not orders:
@@ -487,8 +547,12 @@ def _task_sequence() -> List[str]:
     return ["steady_state", "port_strike", "black_swan"]
 
 
-def run_episode(task_name: str, benchmark_name: str, model_label: str) -> None:
-    """Run one task episode and emit exactly one START...END block."""
+def run_episode(task_name: str, benchmark_name: str, model_label: str, agent_runtime: SupplyChainAgent) -> None:
+    """Run a resilient episode loop for one task and emit one START...END block.
+
+    The loop enforces schema-safe action generation, retries transient step failures,
+    and falls back to a safe wait action before terminating on persistent errors.
+    """
     log_start(task=task_name, env=benchmark_name, model=model_label)
 
     rewards: List[float] = []
@@ -500,10 +564,10 @@ def run_episode(task_name: str, benchmark_name: str, model_label: str) -> None:
     try:
         reset_response = requests.get(f"{ENV_URL}/reset?task={task_name}", timeout=30)
         reset_response.raise_for_status()
-        state = reset_response.json()
+        state: EnvState = reset_response.json()
 
         if AGENT_BACKEND == "huggingface":
-            loaded_agent = build_huggingface_agent()
+            loaded_agent = agent_runtime.build_huggingface_agent()
             print(
                 f"[INFO] backend=huggingface model={MODEL_NAME} loaded={loaded_agent is not None}",
                 flush=True,
@@ -514,12 +578,29 @@ def run_episode(task_name: str, benchmark_name: str, model_label: str) -> None:
                 if AGENT_BACKEND == "dummy":
                     action = choose_dummy_action(state)
                 else:
-                    action = choose_action(state)
+                    action = choose_action(state, agent_runtime)
                 action_str = action_to_string(action)
 
-                step_response = requests.post(f"{ENV_URL}/step", json=action, timeout=30)
-                step_response.raise_for_status()
-                result = step_response.json()
+                result: Dict[str, Any] | None = None
+                step_error_text: Optional[str] = None
+                for attempt in range(STEP_MAX_RETRIES + 1):
+                    try:
+                        step_response = requests.post(f"{ENV_URL}/step", json=action, timeout=30)
+                        step_response.raise_for_status()
+                        result = step_response.json()
+                        break
+                    except Exception as exc:
+                        step_error_text = str(exc)
+                        if attempt < STEP_MAX_RETRIES:
+                            action = {"type": "wait"}
+                            action_str = action_to_string(action)
+                            continue
+
+                if result is None:
+                    last_error = step_error_text or "step_failed"
+                    log_step(step=step, action=action_str, reward=0.0, done=True, error=last_error)
+                    steps_taken = step
+                    break
 
                 raw_reward = float(result.get("reward", {}).get("value", 0.0))
                 reward_value = normalize_reward(raw_reward)
@@ -555,15 +636,29 @@ def run_episode(task_name: str, benchmark_name: str, model_label: str) -> None:
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        print(
+            f"Summary: task={task_name} success={str(success).lower()} steps={steps_taken} score={score:.6f} last_error={last_error or 'none'}",
+            flush=True,
+        )
 
 
 def main() -> None:
-    """Main entry point following Meta's [START] [STEP] [END] format."""
+    """Execute all configured tasks with consistent competition-compliant logging.
+
+    This orchestrator isolates runtime agent state per process, runs each task episode,
+    and guarantees the [START] [STEP] [END] contract for validator compatibility.
+    """
     benchmark_name = os.getenv("SUPPLY_CHAIN_BENCHMARK", "supply-chain-chaos")
     model_label = MODEL_NAME if AGENT_BACKEND == "huggingface" else "dummy-heuristic"
+    agent_runtime = SupplyChainAgent()
 
     for task_name in _task_sequence():
-        run_episode(task_name=task_name, benchmark_name=benchmark_name, model_label=model_label)
+        run_episode(
+            task_name=task_name,
+            benchmark_name=benchmark_name,
+            model_label=model_label,
+            agent_runtime=agent_runtime,
+        )
 
 
 if __name__ == "__main__":

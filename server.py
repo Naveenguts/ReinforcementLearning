@@ -56,6 +56,7 @@ def grade(task: TaskName = TaskName.steady_state) -> dict:
         total_steps_taken=env.state.time_step,
         max_steps=env.max_steps,
         final_reward=env.episode_reward,  # Use cumulative reward from episode
+        carbon_footprint=env.state.carbon_footprint,
     )
     
     return {

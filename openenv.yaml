@@ -10,21 +10,21 @@ tasks:
     description: Baseline demand with no forced disruptions. Deliver 3 orders on time.
     difficulty: easy
     max_steps: 20
-    expected_reward_range: [0.0, 300.0]
+    expected_reward_range: [-50.0, 350.0]
     grader: graders.SteadyStateGrader
     
   - name: port_strike
     description: Primary route blocked at step 5. 4 orders must be rerouted under disruption.
     difficulty: medium
     max_steps: 20
-    expected_reward_range: [0.0, 400.0]
+    expected_reward_range: [-50.0, 420.0]
     grader: graders.PortStrikeGrader
     
   - name: black_swan
-    description: Cascading disruptions (route closure, demand spike, fuel surge). 5 orders test agent resilience.
+    description: Cascading disruptions (route closure, demand spike, fuel surge). 5 orders test resilience, with O5 flagged as critical.
     difficulty: hard
     max_steps: 20
-    expected_reward_range: [0.0, 500.0]
+    expected_reward_range: [-50.0, 500.0]
     grader: graders.BlackSwanGrader
 
 # Observation space (what agent sees each step)
